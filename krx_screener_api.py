@@ -41,8 +41,9 @@ try:
 except Exception:
     krx_dart = None
 
-# 출력 위치 = StockAuto 루트(스크립트 폴더의 상위). Cowork 가 여기서 읽음.
-OUT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# 출력 위치 = 스크립트 폴더 아래 results/. 없으면 생성.
+OUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "results")
+os.makedirs(OUT_DIR, exist_ok=True)
 
 HELD = {"005930", "069500", "035420", "009830"}  # 보유 -> held 표시
 UNIVERSE_TOP = 200     # 시총 상위 N = 코스피200 근사

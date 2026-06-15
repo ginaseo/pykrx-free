@@ -17,8 +17,9 @@ import os, json, datetime
 import pandas as pd
 import krx_naver               # 자체 Naver OHLCV 클라 (pykrx 비의존)
 
-# 출력 위치 = StockAuto 루트(스크립트 폴더의 상위). Cowork 가 여기서 읽음.
-OUT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# 출력 위치 = 스크립트 폴더 아래 results/. 없으면 생성.
+OUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "results")
+os.makedirs(OUT_DIR, exist_ok=True)
 
 # KRX 공식 OpenAPI (인증키 방식, 로그인 없음). 지수 조회용.
 try:
