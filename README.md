@@ -106,6 +106,14 @@ python krx_briefing_fetch.py
 python krx_screener_api.py
 ```
 
+### 자동화 (참고)
+매 영업일 아침 자동 실행을 위해 다음 2개 파일을 별도로 만들어 사용 중이다(현재 이 레포에는 미포함, 경로가 로컬 환경에 종속됨):
+
+- `run_morning.ps1` — 전용 venv 로 브리핑·스크리너를 일괄 실행하는 진입점
+- `register_krx_task.bat` — Windows 작업 스케줄러에 월~금 08:05 실행으로 등록
+
+> 두 파일은 `C:\Archive\StockAuto` 루트 경로를 전제로 작성되어 있어, 환경에 맞게 경로를 수정해야 재사용할 수 있다.
+
 ---
 
 ## 스크리너 방법론
