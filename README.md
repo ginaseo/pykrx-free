@@ -62,7 +62,8 @@ KOSPI 시총 상위 200 유니버스에서 다중 팩터로 점수화해 추천 
 | `krx_briefing_fetch.py` | **브리핑 생성** 진입점 → `results/briefing_data.json` | |
 | `krx_screener_api.py` | **스크리너 생성** 진입점 → `results/kospi200_screen.json` | |
 | `run_morning.ps1` | 작업 스케줄러 진입점 (브리핑+스크리너 일괄) | |
-| `register_krx_task.bat` | Windows 작업 스케줄러 등록 (월~금 08:05) | |
+| `register_krx_task.ps1` | 작업 등록 본체 (배터리/깨우기/따라잡기 설정 포함) | |
+| `register_krx_task.bat` | 위 `.ps1` 을 관리자 권한으로 실행하는 런처 | 자가승격 |
 | `results/` | 산출 JSON 출력 폴더 (자동 생성) | 내용물 gitignore |
 | `corp_map.json` | DART 종목코드→corp_code 캐시 | 자동 생성 (gitignore) |
 | `.env` | 자격증명/인증키 | **git 제외, 커밋 금지** |
@@ -135,16 +136,18 @@ python krx_screener_api.py
 매 영업일 아침 자동 실행을 위한 2개 파일이 포함되어 있다. 자신의 위치를 기준으로 경로를 계산하므로 폴더를 어디에 두든 그대로 동작한다.
 
 - `run_morning.ps1` — 같은 폴더의 전용 venv 로 브리핑·스크리너를 일괄 실행하는 진입점
-- `register_krx_task.bat` — Windows 작업 스케줄러에 월~금 08:05 실행으로 등록 (관리자 권한으로 실행)
+- `register_krx_task.ps1` — 작업 등록 본체. `schtasks` 기본값(배터리면 스킵·절전이면 안 깨움·놓치면 안 돎)을 피해 **배터리 무관 시작 / 절전 깨우기(`WakeToRun`) / 놓친 실행 따라잡기(`StartWhenAvailable`)** 까지 박아서 등록한다
+- `register_krx_task.bat` — 위 `.ps1` 을 **관리자 권한으로 자가승격** 실행하는 런처 (더블클릭 시 UAC)
 
 ```bat
-:: 등록 (register_krx_task.bat 우클릭 > 관리자 권한으로 실행, 또는)
-schtasks /query /tn KRX_Morning_Data     :: 확인
-schtasks /delete /tn KRX_Morning_Data /f :: 삭제
+:: 등록 (register_krx_task.bat 더블클릭 → UAC 승인)
+schtasks /query /tn KRX_Morning_Data /v /fo LIST  :: 확인
+schtasks /delete /tn KRX_Morning_Data /f          :: 삭제
 ```
 
 > **실행 시각 08:05 근거**: KRX OpenAPI 는 [당일 데이터를 오전 8시부터 조회 가능](https://openapi.krx.co.kr/contents/OPP/COMM/faq/OPPCOMM004.cmd)하므로, 여유를 둬 08:05 로 설정.
-> PC 가 08:05 에 켜져 있어야 한다(잠금 상태는 OK, 로그오프/종료는 안 됨).
+> **전원/절전 동작**: 08:05 에 PC 가 **절전이면 깨워서 실행**, **꺼져 있었으면 켜고 로그인할 때 자동 따라잡기 실행**(`StartWhenAvailable`). 단 로그인 상태여야 한다(`LogonType=Interactive`, 비번 미저장).
+> **깨우기 타이머**: `WakeToRun` 은 OS 의 *절전 모드 해제 타이머 허용* 이 켜져 있어야 실제로 깨운다. 이건 작업이 아니라 **전원 구성표 전역 설정**이라, 등록 스크립트가 상태를 확인해 꺼져 있으면 동의를 받고 켠다(`powercfg ... RTCWAKE 1`). 노트북 기본값은 배터리에서 *사용 안 함* 인 경우가 많다.
 > 산출 JSON 은 스크립트 폴더 아래 `results/` 에 생성된다(파이썬 `OUT_DIR` 규칙).
 
 ---

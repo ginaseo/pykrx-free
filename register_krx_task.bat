@@ -1,26 +1,23 @@
 @echo off
 REM =====================================================================
-REM  Register KRX morning task -> run_morning.ps1 (in this folder)
-REM  Mon-Fri 08:05. Output JSON lands in this folder's parent directory.
-REM  Usage: right-click > "Run as administrator" (or double-click)
+REM  Register KRX morning task (Mon-Fri 08:05 -> run_morning.ps1).
+REM  Thin launcher: self-elevates to admin, then runs register_krx_task.ps1
+REM  which bakes in battery/wake/catch-up settings (schtasks defaults skip
+REM  on battery and never wake the PC).
+REM  Usage: double-click (UAC prompt) or right-click > Run as administrator.
 REM =====================================================================
 
-set "PS1=%~dp0run_morning.ps1"
+set "PS1=%~dp0register_krx_task.ps1"
 
-schtasks /create ^
- /tn "KRX_Morning_Data" ^
- /tr "powershell -ExecutionPolicy Bypass -NoProfile -File \"%PS1%\"" ^
- /sc weekly ^
- /d MON,TUE,WED,THU,FRI ^
- /st 08:05 ^
- /f
-
-if %errorlevel%==0 (
-  echo.
-  echo [OK] Task "KRX_Morning_Data" registered - Mon-Fri 08:05
-) else (
-  echo.
-  echo [FAIL] Run as administrator and retry.
+REM --- elevate if not already admin ---
+net session >nul 2>&1
+if not "%errorlevel%"=="0" (
+  echo Requesting administrator privileges...
+  powershell -NoProfile -Command "Start-Process -Verb RunAs -FilePath '%~f0'"
+  exit /b
 )
+
+powershell -ExecutionPolicy Bypass -NoProfile -File "%PS1%"
+
 echo.
 pause
