@@ -16,6 +16,7 @@
 """
 
 import os
+import re
 import json
 import datetime
 
@@ -42,8 +43,13 @@ except Exception:
     krx_dart = None
 
 # 출력 위치 = 스크립트 폴더 아래 results/. 없으면 생성.
-OUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "results")
+_HERE = os.path.dirname(os.path.abspath(__file__))
+OUT_DIR = os.path.join(_HERE, "results")
 os.makedirs(OUT_DIR, exist_ok=True)
+
+# 코스피200 실제 구성종목 명단(선택). 형식은 README 참조. 있으면 시총상위200 근사 대신 사용.
+MEMBERS_FILE = os.path.join(_HERE, "kospi200_members.json")
+MEMBERS_MIN = 150      # 이 미만이면 명단 불완전으로 보고 폴백
 
 HELD = {"005930", "069500", "035420", "009830"}  # 보유 -> held 표시
 UNIVERSE_TOP = 200     # 시총 상위 N = 코스피200 근사
@@ -106,6 +112,35 @@ def value_factors(today):
     return None
 
 
+def load_members():
+    """kospi200_members.json 에서 6자리 종목코드 추출(3형태 허용, README 참조).
+    반환: 코드 리스트(중복 제거, 순서 유지). 파일 없거나 비면 None.
+    """
+    if not os.path.exists(MEMBERS_FILE):
+        return None
+    try:
+        with open(MEMBERS_FILE, encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception:
+        return None
+    items = []
+    if isinstance(data, dict):
+        items = list(data.keys())
+    elif isinstance(data, list):
+        for it in data:
+            if isinstance(it, str):
+                items.append(it)
+            elif isinstance(it, dict):
+                items.append(it.get("code") or it.get("종목코드") or "")
+    seen, codes = set(), []
+    for x in items:
+        m = re.match(r'\s*(\d{6})', str(x))     # 앞 6자리 코드
+        if m and m.group(1) not in seen:
+            seen.add(m.group(1))
+            codes.append(m.group(1))
+    return codes or None
+
+
 def main():
     now = datetime.datetime.now()
 
@@ -116,9 +151,19 @@ def main():
     )
     past_dd, past = _recent_trading_snapshot(past_anchor)
 
-    # === 2) 유니버스: 시총 상위 200 (코스피200 근사) ===
+    # === 2) 유니버스: 코스피200 실제 명단 우선, 없으면 시총 상위 200 근사 ===
     cur = cur[cur["TDD_CLSPRC"].fillna(0) > 0].copy()
-    cur = cur.sort_values("MKTCAP", ascending=False).head(UNIVERSE_TOP)
+    members = load_members()
+    if members and len(members) >= MEMBERS_MIN:
+        hit = [c for c in members if c in cur.index]
+        cur = cur.loc[hit].copy()
+        universe_label = f"코스피200 실제 구성종목 ({len(hit)}종목, kospi200_members.json)"
+        print(f"[universe] 코스피200 명단 사용: {len(members)}개 중 스냅샷 매칭 {len(hit)}개")
+    else:
+        if members:
+            print(f"[universe] 명단 {len(members)}개 < {MEMBERS_MIN} -> 불완전, 시총상위 폴백")
+        cur = cur.sort_values("MKTCAP", ascending=False).head(UNIVERSE_TOP)
+        universe_label = f"KOSPI 시총 상위 {UNIVERSE_TOP} (코스피200 근사)"
 
     # === 3) 종목 메타(소속/구분) 결합 — 있으면 ===
     try:
@@ -154,6 +199,20 @@ def main():
     value_on = vf is not None
     if value_on:
         cur = cur.join(vf, how="left")
+        # 우선주 PER/PBR 보정: KRX 로그인값이 본주만 줘서 우선주는 빔.
+        # PER/PBR ∝ 가격 -> 본주값 × (우선주가/본주가). 본주가 유니버스에 있을 때만.
+        if krx_dart is not None:
+            for code in cur.index:
+                if pd.notna(cur.at[code, "PER"]):
+                    continue
+                b = krx_dart.base_code(code)
+                if b != code and b in cur.index and pd.notna(cur.at[b, "PER"]):
+                    pb, pp = cur.at[b, "TDD_CLSPRC"], cur.at[code, "TDD_CLSPRC"]
+                    if pb and pp:
+                        ratio = pp / pb
+                        cur.at[code, "PER"] = round(float(cur.at[b, "PER"]) * ratio, 1)
+                        if pd.notna(cur.at[b, "PBR"]):
+                            cur.at[code, "PBR"] = round(float(cur.at[b, "PBR"]) * ratio, 2)
         per = cur["PER"].where(cur["PER"] > 0)
         pbr = cur["PBR"].where(cur["PBR"] > 0)
         f_per = 1 - minmax(per.clip(upper=per.quantile(0.95)))
@@ -199,13 +258,18 @@ def main():
 
     # === 5-b) DART 성장성/안정성 가점 (pool 한정, 키 있을 때만) ===
     dart = {}
+    sectors = {}      # {종목코드: 업종버킷} — 부채 감점 면제 판정 + 출력용
     if krx_dart is not None and (os.getenv("DART_API") or True):
         try:
             cmap = krx_dart.load_corp_map()
         except Exception:
             cmap = {}
+        try:
+            sectors = krx_dart.sectors_for(list(pool.index), cmap)  # company.json, 캐시
+        except Exception:
+            sectors = {}
         for code in pool.index:
-            cc = cmap.get(code)
+            cc = cmap.get(code) or cmap.get(krx_dart.base_code(code))  # 우선주->본주
             if not cc:
                 continue
             fin = krx_dart.financials(cc, 2025) or krx_dart.financials(cc, 2024)
@@ -220,7 +284,8 @@ def main():
             if (fin.get("roe_pct") or 0) >= 8:
                 b += 0.03
             dr = fin.get("debt_ratio_pct")
-            if dr is not None and dr > 200:
+            # 금융·보험은 구조적 고부채 -> 부채비율 감점 면제(업종 불리 교정)
+            if dr is not None and dr > 200 and not krx_dart.is_financial(sectors.get(code)):
                 b -= 0.03      # 고부채 감점
             cur.loc[code, "score"] += b
 
@@ -237,9 +302,10 @@ def main():
             "momentum_pct": None if pd.isna(r["mom_pct"]) else float(r["mom_pct"]),
             "trdval_won": None if pd.isna(r["ACC_TRDVAL"]) else int(r["ACC_TRDVAL"]),
             "mktcap_won": None if pd.isna(r["MKTCAP"]) else int(r["MKTCAP"]),
-            # 참고: KRX OpenAPI 엔 업종 분류가 없음. SECT_TP_NM(소속부)은 KOSPI 일반종목 대개 빈값.
-            "sector": (None if pd.isna(r.get("SECT_TP_NM")) or not str(r.get("SECT_TP_NM")).strip()
-                       else str(r.get("SECT_TP_NM"))),
+            # 업종: DART KSIC 버킷 우선(금융/보험 등). 없으면 KRX SECT_TP_NM(대개 빈값) fallback.
+            "sector": (sectors.get(code)
+                       or (None if pd.isna(r.get("SECT_TP_NM")) or not str(r.get("SECT_TP_NM")).strip()
+                           else str(r.get("SECT_TP_NM")))),
             "PER": (None if "PER" not in cur.columns or pd.isna(r.get("PER")) else round(float(r["PER"]), 1)),
             "PBR": (None if "PBR" not in cur.columns or pd.isna(r.get("PBR")) else round(float(r["PBR"]), 2)),
             "DIV": (None if "DIV" not in cur.columns or pd.isna(r.get("DIV")) else round(float(r["DIV"]), 2)),
@@ -263,14 +329,15 @@ def main():
         "generated": now.strftime("%Y-%m-%d %H:%M KST"),
         "as_of": today,
         "momentum_base": past_dd,
-        "universe": f"KOSPI 시총 상위 {UNIVERSE_TOP} (코스피200 근사)",
+        "universe": universe_label,
         "value_source": ("KRX 공식값 (자체 로그인 클라 krx_login)" if value_on else "없음(가치 팩터 제외)"),
         "method": (
             "모멘텀30/가치25/유동성25/사이즈20 + 기술적 가점"
             if value_on else
             "모멘텀55/유동성30/사이즈15 + 기술적 가점 (가치 미포함)"
         ),
-        "dart_factors": ("성장성/안정성 가점 적용(매출·영업익 성장률, ROE, 부채비율)" if dart else "없음"),
+        "dart_factors": ("성장성/안정성 가점 적용(매출·영업익 성장률, ROE, 부채비율; 금융·보험은 부채 감점 면제)" if dart else "없음"),
+        "sector_source": ("DART 기업개황 induty_code(KSIC) 버킷" if sectors else "없음"),
         "disclaimer": "투자 자문 아님. 공개데이터 기반 단순 스크리닝. 투자 판단·손익 책임은 사용자.",
         "recommendations": recs,
     }

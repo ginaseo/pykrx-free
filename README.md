@@ -66,6 +66,8 @@ KOSPI 시총 상위 200 유니버스에서 다중 팩터로 점수화해 추천 
 | `register_krx_task.bat` | 위 `.ps1` 을 관리자 권한으로 실행하는 런처 | 자가승격 |
 | `results/` | 산출 JSON 출력 폴더 (자동 생성) | 내용물 gitignore |
 | `corp_map.json` | DART 종목코드→corp_code 캐시 | 자동 생성 (gitignore) |
+| `sector_map.json` | DART 종목코드→업종(KSIC) 캐시 | 자동 생성 (gitignore) |
+| `kospi200_members.json` | 코스피200 실제 구성종목(선택) | 사용자 저장 (gitignore), 형식은 스크리너 상단 주석 |
 | `.env` | 자격증명/인증키 | **git 제외, 커밋 금지** |
 | `.env.example` | `.env` 양식 | |
 
@@ -154,13 +156,21 @@ schtasks /delete /tn KRX_Morning_Data /f          :: 삭제
 
 ## 스크리너 방법론
 
-- **유니버스**: KOSPI 시총 상위 200 (코스피200 근사. KRX OpenAPI 에 정확한 구성종목 명단 없음)
+- **유니버스**: `kospi200_members.json` 이 있으면 **코스피200 실제 구성종목**, 없으면 KOSPI 시총 상위 200 근사(KRX OpenAPI 엔 구성종목 명단 없음). 150개 미만이면 불완전으로 보고 폴백
 - **스코어**: 모멘텀 30 / 가치(PER·PBR) 25 / 유동성 25 / 사이즈 20
 - **가점**: 기술적(이평 정배열·RSI 40~70·MA20 상회) + DART(영업익 성장 / 매출 성장 / ROE≥8 / 고부채 감점)
 - **2단계**: 1차 벌크 스코어 → 상위 ~25 후보만 OHLCV(Naver)·DART 호출로 정밀 보정
 
+### `kospi200_members.json` 형식 (선택)
+KRX 정보데이터시스템 > 지수 > 지수구성종목 명단을 아래 3형태 중 아무거나로 저장. 각 항목에서 **6자리 종목코드만** 추출(나머지 무시)하므로 컬럼·구분자 신경 안 써도 됨.
+```jsonc
+["005930", "000660", ...]                      // 1) 코드 배열
+[{"code":"005930","name":"삼성전자"}, ...]       // 2) 객체 배열(code 또는 종목코드 키)
+{"005930":"삼성전자", ...}                       // 3) {코드:이름} 객체
+```
+
 ### 호출량 (1회 실행)
-- KRX OpenAPI: 스냅샷 2~5콜 · KRX 로그인: 1회(PER/PBR) · Naver OHLCV: ~25콜 · DART: ~25콜(corp_map 캐시)
+- KRX OpenAPI: 스냅샷 2~5콜 · KRX 로그인: 1회(PER/PBR) · Naver OHLCV: ~25콜 · DART: ~25콜(corp_map 캐시) · company.json: ~25콜(업종, sector_map 캐시)
 
 ---
 
@@ -210,7 +220,7 @@ schtasks /delete /tn KRX_Morning_Data /f          :: 삭제
 
 ## 한계 / 확장 여지
 
-- **코스피200 정확 명단** 미제공 → 시총 상위 200 근사 사용
-- **업종 분류** 없음(KRX OpenAPI 미제공). 보험사 등 고부채 업종은 부채 감점이 다소 불리
+- **코스피200 정확 명단**: KRX OpenAPI 엔 없음 → `kospi200_members.json`(KRX 정보데이터시스템 > 지수 > 지수구성종목 명단을 JSON 으로 저장; 허용 형식은 스크리너 상단 주석 참조) 있으면 실제 명단 사용, 없으면 시총 상위 200 근사로 폴백. 구성종목은 연 2회(6·12월) 정기변경 시에만 갱신하면 됨
+- **업종 분류**: KRX OpenAPI 엔 없음 → DART 기업개황 `induty_code`(KSIC)로 업종 버킷 부여(`sector_map.json` 캐시). 금융·보험은 구조적 고부채라 부채비율 감점을 면제한다. KSIC 미상 종목은 `기타`
 - **수정주가**: Naver 기간조회는 수정주가 적용 → 과거 분할 종목은 KRX 원시값과 과거 구간 상이 가능(현재가는 동일)
 - **무로그인 완전 전환**: DART 로 PER/PBR 대체 시 KRX 로그인 제거 가능하나, 종목당 재무 호출+근사 계산이라 정확도 트레이드오프 존재. 더 나은 무로그인 경로를 계속 탐색 중.

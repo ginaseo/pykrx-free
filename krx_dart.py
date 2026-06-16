@@ -21,6 +21,7 @@ import requests
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _CORP_MAP = os.path.join(_HERE, "corp_map.json")
+_SECTOR_MAP = os.path.join(_HERE, "sector_map.json")   # {종목코드: induty_code} 캐시
 BASE = "https://opendart.fss.or.kr/api"
 
 
@@ -72,7 +73,10 @@ def load_corp_map(force=False) -> dict:
 
 # 재무 항목 매핑 (account_id 우선, 이름 fallback)
 _ACC = {
-    "revenue":  ({"ifrs-full_Revenue", "ifrs_Revenue"}, ("매출액", "영업수익", "수익(매출액)")),
+    # 금융/보험은 '매출액' 계정이 없음 -> 이자수익/보험료수익/영업수익 등으로 대체
+    "revenue":  ({"ifrs-full_Revenue", "ifrs_Revenue"},
+                 ("매출액", "영업수익", "수익(매출액)",
+                  "이자수익", "보험료수익", "수수료수익", "영업수익(매출액)")),
     "op":       ({"dart_OperatingIncomeLoss", "ifrs-full_OperatingIncomeLoss"}, ("영업이익", "영업이익(손실)")),
     "ni":       ({"ifrs-full_ProfitLoss"}, ("당기순이익", "당기순이익(손실)", "분기순이익")),
     "equity":   ({"ifrs-full_Equity"}, ("자본총계",)),
@@ -161,6 +165,90 @@ def financials(corp_code: str, year: int, reprt="11011"):
                                if li_t is not None and eq_t not in (None, 0) else None),
         }
     return None
+
+
+# ---------- 업종 분류 (company.json 의 induty_code = KSIC) ----------
+# KSIC 대분류(앞 2자리) -> 거친 업종 버킷. 부채 감점 면제 판정(금융/보험)이 주 목적.
+_KSIC2 = {
+    "01": "농림어업", "02": "농림어업", "03": "농림어업",
+    "05": "광업", "06": "광업", "07": "광업", "08": "광업",
+    **{f"{n:02d}": "제조" for n in range(10, 34)},
+    "35": "전기가스", "36": "수도환경", "37": "수도환경", "38": "수도환경", "39": "수도환경",
+    "41": "건설", "42": "건설",
+    "45": "도소매", "46": "도소매", "47": "도소매",
+    "49": "운수", "50": "운수", "51": "운수", "52": "운수",
+    "55": "숙박음식", "56": "숙박음식",
+    "58": "정보통신", "59": "정보통신", "60": "정보통신",
+    "61": "정보통신", "62": "정보통신", "63": "정보통신",
+    "64": "금융", "66": "금융", "65": "보험",
+    "68": "부동산",
+    "70": "전문서비스", "71": "전문서비스", "72": "전문서비스", "73": "전문서비스",
+}
+_FINANCIAL = {"금융", "보험"}   # 구조적 고부채 -> 부채비율 감점 무의미
+
+
+def base_code(code: str) -> str:
+    """우선주 코드 -> 본주 코드(끝자리 5/6/7 등 -> 0). DART/업종은 회사 단위라 본주로 조회.
+    예: 005935(삼성전자우) -> 005930. 끝자리 0이면 그대로."""
+    code = str(code).strip()
+    if len(code) == 6 and code[-1] != "0":
+        return code[:5] + "0"
+    return code
+
+
+def company_info(corp_code: str):
+    """DART 기업개황. {induty_code, corp_name} 반환, 실패 시 None."""
+    key = _key()
+    if not key or not corp_code:
+        return None
+    try:
+        r = requests.get(f"{BASE}/company.json",
+                         params={"crtfc_key": key, "corp_code": corp_code}, timeout=30)
+        d = r.json()
+    except Exception:
+        return None
+    if d.get("status") != "000":
+        return None
+    return {"induty_code": (d.get("induty_code") or "").strip(),
+            "corp_name": d.get("corp_name")}
+
+
+def sector_bucket(induty_code: str):
+    """KSIC induty_code -> 업종 버킷. 미상이면 '기타', 빈값이면 None."""
+    if not induty_code:
+        return None
+    return _KSIC2.get(induty_code[:2], "기타")
+
+
+def is_financial(sector: str) -> bool:
+    return sector in _FINANCIAL
+
+
+def sectors_for(stock_codes, corp_map: dict) -> dict:
+    """{종목코드: 업종버킷} 반환. induty_code 는 sector_map.json 에 캐시(빈값도 저장해 재호출 방지)."""
+    try:
+        with open(_SECTOR_MAP, encoding="utf-8") as f:
+            cache = json.load(f)
+    except Exception:
+        cache = {}
+    changed = False
+    out = {}
+    for sc in stock_codes:
+        ind = cache.get(sc)
+        if ind is None:                       # 미캐시 -> 조회 (우선주는 본주로 폴백)
+            cc = corp_map.get(sc) or corp_map.get(base_code(sc))
+            info = company_info(cc)
+            ind = (info or {}).get("induty_code", "") or ""
+            cache[sc] = ind
+            changed = True
+        out[sc] = sector_bucket(ind)
+    if changed:
+        try:
+            with open(_SECTOR_MAP, "w", encoding="utf-8") as f:
+                json.dump(cache, f, ensure_ascii=False)
+        except Exception:
+            pass
+    return out
 
 
 def per_pbr(fin: dict, close: float, shares: float):
