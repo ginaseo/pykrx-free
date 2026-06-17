@@ -8,8 +8,8 @@ RESULTS_DIR = os.path.join(ROOT, "results")
 
 
 def env_candidates():
-    """`.env` 후보 경로(루트 우선). 클라이언트들이 인증키/자격증명 로드에 사용."""
-    return (os.path.join(ROOT, ".env"), os.path.join(ROOT, "pykrx-master", ".env"))
+    """`.env` 후보 경로. 클라이언트들이 인증키/자격증명 로드에 사용."""
+    return (os.path.join(ROOT, ".env"),)
 
 
 def data_path(name):

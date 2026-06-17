@@ -57,7 +57,7 @@
 | 경로 | 정체 | PER/PBR | 인증(2026) |
 |------|------|---------|-----------|
 | ① 공식 OpenAPI (`openapi.krx`, `/svc/apis`) | 거래소 정식 개방. `krx_openapi.py` | ❌ 엔드포인트 없음 | 인증키 |
-| ② 내부 AJAX (`getJsonData.cmd`) | 사이트 화면용 내부 API 스크래핑 = pykrx, `krx_login.py` | ✅ MDCSTAT03501 | **로그인 필요** |
+| ② 내부 AJAX (`getJsonData.cmd`) | 사이트 화면용 내부 API 스크래핑 = pykrx, `krxfree/clients/login.py` | ✅ MDCSTAT03501 | **로그인 필요** |
 | ③ OTP 다운로드 (`comm/fileDn`) | 사이트 다운로드 버튼 스크래핑 = 옛 블로그/quant_cookbook | ✅ | **로그인 필요** |
 
 ### 검증 결과
