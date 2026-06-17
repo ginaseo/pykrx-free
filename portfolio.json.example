@@ -1,0 +1,8 @@
+{
+  "holdings": [
+    {"market": "KR", "name": "삼성전자", "code": "005930", "shares": 10, "avg": 70000},
+    {"market": "US", "name": "엔비디아", "ticker": "NVDA", "shares": 1, "avg": 100},
+    {"code": "000660"},
+    {"ticker": "AAPL"}
+  ]
+}

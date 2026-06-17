@@ -8,17 +8,21 @@
     또는   python krx_briefing_fetch.py
 
 [결과]
-    이 폴더에 briefing_data.json 생성/갱신 → 클로드가 읽어 브리핑 작성.
+    results/ 에 briefing_data.json 생성/갱신 → 클로드가 읽어 브리핑 작성.
 
-* NVDA까지 받으려면:  pip install yfinance  (없으면 클로드가 자동으로 채움)
+[개인 포트폴리오]
+    보유종목·평단·해외종목은 코드가 아니라 portfolio.json 에서 읽는다(형식은 README).
+    파일이 없으면 지수만 산출. 미국(US) 시세는 yfinance 필요 — 미설치/실패 시 해당
+    종목은 시세 없이 기록한다(임의 추정 금지: 주가는 실측값만 사용).
 """
 
 import os, json, datetime
 import pandas as pd
 import krx_naver               # 자체 Naver OHLCV 클라 (pykrx 비의존)
 
+_HERE = os.path.dirname(os.path.abspath(__file__))
 # 출력 위치 = 스크립트 폴더 아래 results/. 없으면 생성.
-OUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "results")
+OUT_DIR = os.path.join(_HERE, "results")
 os.makedirs(OUT_DIR, exist_ok=True)
 
 # KRX 공식 OpenAPI (인증키 방식, 로그인 없음). 지수 조회용.
@@ -27,13 +31,29 @@ try:
 except Exception:
     krx_openapi = None
 
-HOLDINGS = [
-    {"name": "삼성전자",   "code": "005930", "shares": 3,  "avg": 198033},
-    {"name": "KODEX 200", "code": "069500", "shares": 34, "avg": 90170},
-    {"name": "NAVER",      "code": "035420", "shares": 30, "avg": 248866},
-    {"name": "한화솔루션", "code": "009830", "shares": 1,  "avg": 58200},
-]
-NVDA = {"avg": 103.48, "shares": 0.052639}
+
+def load_portfolio():
+    """개인 포트폴리오를 portfolio.json 에서 로드(코드에 개인정보 미포함, 형식은 README 참조).
+    holdings 단일 배열: 각 항목 market 으로 KR(Naver)/US(yfinance) 분기.
+    파일 없으면 보유종목 없이 지수만 산출.
+    """
+    path = os.path.join(_HERE, "portfolio.json")
+    if not os.path.exists(path):
+        return []
+    try:
+        with open(path, encoding="utf-8-sig") as f:   # BOM 허용(Windows 편집기 대비)
+            d = json.load(f)
+    except Exception:
+        return []
+    return d.get("holdings") or []
+
+
+def market_of(h):
+    """항목의 시장 판정. market 명시 우선, 없으면 ticker 있으면 US, 아니면 KR."""
+    return (h.get("market") or ("US" if h.get("ticker") else "KR")).upper()
+
+
+HOLDINGS = load_portfolio()
 
 def rsi(series, period=14):
     delta = series.diff()
@@ -51,13 +71,14 @@ def analyze(code):
     close = df["종가"].astype(float)
     last = df.iloc[-1]
     cur = float(last["종가"])
-    prev_close = float(close.iloc[-2]) if len(close) > 1 else cur
+    have_prev = len(close) > 1
+    prev_close = float(close.iloc[-2]) if have_prev else None   # 전일 없으면 추측 안 함
     H, L, C = float(last["고가"]), float(last["저가"]), cur
     P = (H + L + C) / 3
     return {
         "date": df.index[-1].strftime("%Y-%m-%d"),
         "current": cur, "prev_close": prev_close,
-        "pct": round((cur - prev_close) / prev_close * 100, 2),
+        "pct": round((cur - prev_close) / prev_close * 100, 2) if have_prev else None,
         "rsi14": round(float(rsi(close)), 1),
         "ma5": round(float(close.rolling(5).mean().iloc[-1]), 1),
         "ma20": round(float(close.rolling(20).mean().iloc[-1]), 1),
@@ -99,33 +120,72 @@ def index_snapshot(market, idx_name):
             row = df.iloc[[0]]  # 종합지수가 첫 행인 경우 대비
         r = row.iloc[0]
         cur = float(r["CLSPRC_IDX"])
-        pct = float(r.get("FLUC_RT", 0) or 0)
+        rt = r.get("FLUC_RT")
+        pct = float(rt) if rt not in (None, "") else None   # 없으면 추측 0 대신 None
         return {"date": f"{d[:4]}-{d[4:6]}-{d[6:]}", "current": round(cur, 2), "pct": pct}
     return {"note": f"지수 조회 실패(idx 서비스 이용신청 필요?): {last_err}"}
 
-out = {"generated": datetime.datetime.now().strftime("%Y-%m-%d %H:%M KST"), "holdings": [], "indices": {}}
+_yf = None
+def _yfin():
+    """yfinance 지연 로드. 미설치면 None."""
+    global _yf
+    if _yf is None:
+        try:
+            import yfinance as yf
+            _yf = yf
+        except Exception:
+            _yf = False
+    return _yf or None
 
+
+def analyze_us(ticker):
+    """해외 종목 시세(yfinance). {current, pct} 또는 None."""
+    yf = _yfin()
+    if yf is None or not ticker:
+        return None
+    try:
+        hist = yf.Ticker(ticker).history(period="5d")
+        cur = float(hist["Close"].iloc[-1]); prev = float(hist["Close"].iloc[-2])
+        return {"current": round(cur, 2), "pct": round((cur - prev) / prev * 100, 2)}
+    except Exception:
+        return None
+
+
+out = {"generated": datetime.datetime.now().strftime("%Y-%m-%d %H:%M KST"),
+       "data_policy": "모든 수치는 실측값. 누락은 note 로 표기되며 추정·임의 보완 금지(주가).",
+       "holdings": [], "indices": {}}
+
+# 보유종목: 단일 리스트, market 으로 KR(Naver)/US(yfinance) 분기. 평가손익은 KR=pnl_krw, US=pnl.
 for h in HOLDINGS:
-    a = analyze(h["code"])
-    if a:
-        a.update({"name": h["name"], "code": h["code"], "shares": h["shares"], "avg": h["avg"],
-                  "return_pct": round((a["current"] - h["avg"]) / h["avg"] * 100, 2),
-                  "pnl_krw": round((a["current"] - h["avg"]) * h["shares"])})
-    out["holdings"].append(a or {"name": h["name"], "code": h["code"], "error": "no data"})
+    mkt = market_of(h)
+    name, avg, shares = h.get("name"), h.get("avg"), h.get("shares")
+    if mkt == "KR":
+        item = {"market": "KR", "name": name or h.get("code"), "code": h.get("code")}
+        a = analyze(h.get("code"))
+        if a:
+            item.update(a)
+            if avg and shares is not None:
+                item.update({"avg": avg, "shares": shares,
+                             "return_pct": round((a["current"] - avg) / avg * 100, 2),
+                             "pnl_krw": round((a["current"] - avg) * shares)})
+        else:
+            item["error"] = "no data"
+    else:  # US (yfinance)
+        ticker = h.get("ticker") or h.get("code")
+        item = {"market": "US", "name": name or ticker, "ticker": ticker}
+        a = analyze_us(ticker)
+        if a:
+            item.update(a)
+            if avg and shares is not None:
+                item.update({"avg": avg, "shares": shares,
+                             "return_pct": round((a["current"] - avg) / avg * 100, 2),
+                             "pnl": round((a["current"] - avg) * shares, 2)})
+        else:
+            item["note"] = "시세 미수집(yfinance 미설치 또는 조회 실패) — 추정 금지, 데이터 없음으로 처리."
+    out["holdings"].append(item)
 
 for nm, idxnm in (("KOSPI", "코스피"), ("KOSDAQ", "코스닥")):
     out["indices"][nm] = index_snapshot(nm, idxnm)
-
-try:
-    import yfinance as yf
-    hist = yf.Ticker("NVDA").history(period="5d")
-    cur = float(hist["Close"].iloc[-1]); prev = float(hist["Close"].iloc[-2])
-    out["nvda"] = {"current": round(cur, 2), "pct": round((cur - prev) / prev * 100, 2),
-                   "avg": NVDA["avg"], "shares": NVDA["shares"],
-                   "return_pct": round((cur - NVDA["avg"]) / NVDA["avg"] * 100, 2),
-                   "pnl_usd": round((cur - NVDA["avg"]) * NVDA["shares"], 2)}
-except Exception:
-    out["nvda"] = {"note": "yfinance 미설치 — NVDA는 클로드가 자동으로 채웁니다."}
 
 with open(os.path.join(OUT_DIR, "briefing_data.json"), "w", encoding="utf-8") as f:
     json.dump(out, f, ensure_ascii=False, indent=2)

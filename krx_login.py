@@ -110,6 +110,23 @@ def fundamental(session: requests.Session, date: str, market: str = "ALL") -> pd
     return out
 
 
+def index_members(session: requests.Session, date: str, index_ticker: str = "1028") -> list:
+    """지수 구성종목 6자리 코드 리스트(MDCSTAT00601). KOSPI200='1028'. 실패/빈값이면 [].
+
+    로그인 세션 필요(KRX 가 무로그인 차단). index_ticker 앞1자리=indIdx, 나머지=indIdx2.
+    """
+    idx, idx2 = index_ticker[0], index_ticker[1:]
+    rows = _json_data(session, "dbms/MDC/STAT/standard/MDCSTAT00601",
+                      indIdx=idx, indIdx2=idx2, trdDd=date,
+                      money="3", csvxls_isNo="false")
+    out = []
+    for r in rows:
+        c = str(r.get("ISU_SRT_CD") or "").strip()
+        if len(c) == 6 and c.isdigit():
+            out.append(c)
+    return out
+
+
 if __name__ == "__main__":
     s = login()
     print("로그인 성공")

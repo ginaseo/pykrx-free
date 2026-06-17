@@ -51,7 +51,6 @@ os.makedirs(OUT_DIR, exist_ok=True)
 MEMBERS_FILE = os.path.join(_HERE, "kospi200_members.json")
 MEMBERS_MIN = 150      # 이 미만이면 명단 불완전으로 보고 폴백
 
-HELD = {"005930", "069500", "035420", "009830"}  # 보유 -> held 표시
 UNIVERSE_TOP = 200     # 시총 상위 N = 코스피200 근사
 STAGE2_POOL = 25       # 기술적 확인 대상
 TOP_N = 12             # 최종 출력
@@ -95,20 +94,29 @@ def rsi(series, period=14):
     return float((100 - 100 / (1 + gain / loss)).iloc[-1])
 
 
-def value_factors(today):
-    """PER/PBR/DIV DataFrame(index=종목코드) 반환. 불가하면 None.
+def krx_session():
+    """KRX 로그인 세션 1회 생성(PER/PBR + 지수구성종목 공용). 자격증명 없거나 실패 시 None."""
+    if not (os.getenv("KRX_ID") and os.getenv("KRX_PW")):
+        return None
+    try:
+        return krx_login.login()
+    except Exception:
+        return None
 
-    KRX 공식값 = 자체 로그인 클라(krx_login)로 getJsonData 직접 호출. pykrx 비의존.
-    KRX_ID/KRX_PW 없으면 None -> 가치 팩터 제외.
+
+def value_factors(today, session):
+    """PER/PBR/DIV DataFrame(index=종목코드) 반환. 세션 없거나 불가하면 None.
+
+    KRX 공식값 = 로그인 세션으로 getJsonData(MDCSTAT03501) 호출. pykrx 비의존.
     """
-    if os.getenv("KRX_ID") and os.getenv("KRX_PW"):
-        try:
-            s = krx_login.login()
-            f = krx_login.fundamental(s, today, "KOSPI")  # index=종목코드, PER/PBR/DIV 포함
-            if f is not None and not f.empty and "PER" in f.columns:
-                return f[["PER", "PBR", "DIV"]]
-        except Exception:
-            return None
+    if session is None:
+        return None
+    try:
+        f = krx_login.fundamental(session, today, "KOSPI")  # index=종목코드, PER/PBR/DIV
+        if f is not None and not f.empty and "PER" in f.columns:
+            return f[["PER", "PBR", "DIV"]]
+    except Exception:
+        return None
     return None
 
 
@@ -119,7 +127,7 @@ def load_members():
     if not os.path.exists(MEMBERS_FILE):
         return None
     try:
-        with open(MEMBERS_FILE, encoding="utf-8") as f:
+        with open(MEMBERS_FILE, encoding="utf-8-sig") as f:   # BOM 허용
             data = json.load(f)
     except Exception:
         return None
@@ -141,6 +149,27 @@ def load_members():
     return codes or None
 
 
+def load_held():
+    """보유 국내종목 코드 집합을 portfolio.json 에서 로드(held 표시용). 없으면 빈 집합."""
+    path = os.path.join(_HERE, "portfolio.json")
+    if not os.path.exists(path):
+        return set()
+    try:
+        with open(path, encoding="utf-8-sig") as f:   # BOM 허용
+            d = json.load(f)
+    except Exception:
+        return set()
+    out = set()
+    for h in d.get("holdings") or []:
+        c = str(h.get("code") or "").strip()
+        if len(c) == 6 and c.isdigit():
+            out.add(c)
+    return out
+
+
+HELD = load_held()
+
+
 def main():
     now = datetime.datetime.now()
 
@@ -151,17 +180,34 @@ def main():
     )
     past_dd, past = _recent_trading_snapshot(past_anchor)
 
+    # KRX 로그인 1회(있으면) — PER/PBR + 코스피200 구성종목 둘 다 이 세션 사용.
+    session = krx_session()
+
     # === 2) 유니버스: 코스피200 실제 명단 우선, 없으면 시총 상위 200 근사 ===
+    #   1순위 로그인 세션의 KRX 지수구성종목(MDCSTAT00601, 정확·자동)
+    #   2순위 수동 kospi200_members.json
+    #   3순위 시총 상위 200 근사
     cur = cur[cur["TDD_CLSPRC"].fillna(0) > 0].copy()
-    members = load_members()
-    if members and len(members) >= MEMBERS_MIN:
+    members, members_src = None, None
+    if session is not None:
+        try:
+            m = krx_login.index_members(session, today, "1028")  # KOSPI200
+            if m and len(m) >= MEMBERS_MIN:
+                members, members_src = m, "KRX 지수구성종목(MDCSTAT00601)"
+        except Exception:
+            pass
+    if members is None:
+        fm = load_members()
+        if fm and len(fm) >= MEMBERS_MIN:
+            members, members_src = fm, "kospi200_members.json"
+        elif fm:
+            print(f"[universe] 수동 명단 {len(fm)}개 < {MEMBERS_MIN} -> 불완전, 시총상위 폴백")
+    if members:
         hit = [c for c in members if c in cur.index]
         cur = cur.loc[hit].copy()
-        universe_label = f"코스피200 실제 구성종목 ({len(hit)}종목, kospi200_members.json)"
-        print(f"[universe] 코스피200 명단 사용: {len(members)}개 중 스냅샷 매칭 {len(hit)}개")
+        universe_label = f"코스피200 실제 구성종목 ({len(hit)}종목, {members_src})"
+        print(f"[universe] {members_src}: {len(members)}개 중 스냅샷 매칭 {len(hit)}개")
     else:
-        if members:
-            print(f"[universe] 명단 {len(members)}개 < {MEMBERS_MIN} -> 불완전, 시총상위 폴백")
         cur = cur.sort_values("MKTCAP", ascending=False).head(UNIVERSE_TOP)
         universe_label = f"KOSPI 시총 상위 {UNIVERSE_TOP} (코스피200 근사)"
 
@@ -195,24 +241,12 @@ def main():
     cur["f_size"] = f_size.round(3)
 
     # 가치 팩터(PER/PBR) — DART 미발급 시 KRX 로그인으로 획득. 불가하면 제외.
-    vf = value_factors(today)
+    vf = value_factors(today, session)
     value_on = vf is not None
     if value_on:
         cur = cur.join(vf, how="left")
-        # 우선주 PER/PBR 보정: KRX 로그인값이 본주만 줘서 우선주는 빔.
-        # PER/PBR ∝ 가격 -> 본주값 × (우선주가/본주가). 본주가 유니버스에 있을 때만.
-        if krx_dart is not None:
-            for code in cur.index:
-                if pd.notna(cur.at[code, "PER"]):
-                    continue
-                b = krx_dart.base_code(code)
-                if b != code and b in cur.index and pd.notna(cur.at[b, "PER"]):
-                    pb, pp = cur.at[b, "TDD_CLSPRC"], cur.at[code, "TDD_CLSPRC"]
-                    if pb and pp:
-                        ratio = pp / pb
-                        cur.at[code, "PER"] = round(float(cur.at[b, "PER"]) * ratio, 1)
-                        if pd.notna(cur.at[b, "PBR"]):
-                            cur.at[code, "PBR"] = round(float(cur.at[b, "PBR"]) * ratio, 2)
+        # PER/PBR 은 KRX 공식값만 사용. 공식값 없는 종목(우선주 등)은 null 로 둠
+        # (가격비례 등 추측 계산 금지 — 주가/밸류는 실측값만).
         per = cur["PER"].where(cur["PER"] > 0)
         pbr = cur["PBR"].where(cur["PBR"] > 0)
         f_per = 1 - minmax(per.clip(upper=per.quantile(0.95)))
@@ -272,7 +306,8 @@ def main():
             cc = cmap.get(code) or cmap.get(krx_dart.base_code(code))  # 우선주->본주
             if not cc:
                 continue
-            fin = krx_dart.financials(cc, 2025) or krx_dart.financials(cc, 2024)
+            _fy = now.year - 1                  # 최신 사업보고서(직전 회계연도), 미공시면 그 전년
+            fin = krx_dart.financials(cc, _fy) or krx_dart.financials(cc, _fy - 1)
             if not fin:
                 continue
             dart[code] = fin
