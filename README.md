@@ -149,6 +149,21 @@ RSI·이동평균 기준으로 주의가 필요한 종목 있으면 짚어줘.
 특히 가치(PER/PBR)와 모멘텀이 함께 좋은 종목 있으면 강조해줘.
 ```
 
+**공시/뉴스/매크로 반영 분석** (kospi200_screen.json 첨부 후, Phase1~3 필드 활용):
+```
+첨부한 JSON은 오늘 코스피200 스크리닝 결과야. 각 종목의 momentum_label, disclosure,
+thesis_status, news_count_7d, 최상위 macro 섹션을 참고해서 다음을 알려줘.
+
+1. momentum_label이 "원인 불명 변동성"이거나 "재료 미확인 상승"인 종목은 따로 모아서
+   왜 그런지(뉴스 적음/실적 근거 없음) 짚어줘. 추격 매수 주의 종목으로 표시해줘.
+2. disclosure에 hard_negative/soft_negative/dilution(특히 제3자배정·일반공모)이 있는
+   종목은 경고로 따로 알려줘.
+3. held=true 종목 중 thesis_status가 "주의"나 "재검토 필요"인 게 있으면
+   투자 논리가 깨졌는지 설명해줘(보유 중인 KODEX 200은 개별 공시/뉴스 대상 아니니 제외).
+4. macro 섹션(us10y, usdkrw, kospi, foreign_netflow_7d_won)으로 지금 환경이
+   KODEX200 같은 지수상품 보유에 우호적인지 비우호적인지 한 줄로 평가해줘.
+```
+
 **두 파일 동시 활용**:
 ```
 briefing_data.json = 내 현재 포트폴리오
