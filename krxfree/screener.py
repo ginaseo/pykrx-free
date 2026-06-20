@@ -338,6 +338,33 @@ def main():
         "foreign_netflow_7d_won": macro_client.foreign_netflow(session, days=7),
     }
 
+    # === 5-e) KODEX 200(ETF) 보유 현황 — 개별주 유니버스엔 없음(ETF), 팩터 미적용
+    KODEX200_CODE = "069500"
+    kodex200_holding = None
+    if KODEX200_CODE in HELD:
+        try:
+            etf_cur = openapi.etf_daily(today)
+            etf_past = openapi.etf_daily(past_dd)
+            if KODEX200_CODE in etf_cur.index:
+                row = etf_cur.loc[KODEX200_CODE]
+                close = float(row["TDD_CLSPRC"])
+                mom_pct = None
+                if KODEX200_CODE in etf_past.index:
+                    past_close = float(etf_past.loc[KODEX200_CODE]["TDD_CLSPRC"])
+                    if past_close:
+                        mom_pct = round((close / past_close - 1) * 100, 2)
+                kodex200_holding = {
+                    "code": KODEX200_CODE,
+                    "name": row.get("ISU_NM"),
+                    "close": close,
+                    "nav": None if pd.isna(row.get("NAV")) else float(row["NAV"]),
+                    "fluc_rt": None if pd.isna(row.get("FLUC_RT")) else float(row["FLUC_RT"]),
+                    "momentum_pct": mom_pct,
+                    "note": "개별주 팩터(모멘텀/가치/유동성/사이즈) 미적용. macro 섹션으로 판단",
+                }
+        except openapi.KrxApiError:
+            kodex200_holding = None
+
     # === 6) 출력 ===
     final = cur.sort_values("score", ascending=False)
     # 보유종목은 점수 순위와 무관하게 항상 포함(thesis 판단 노출 보장) + 비보유 상위 TOP_N
@@ -403,6 +430,7 @@ def main():
         "news_source": ("Google News RSS 종목명 검색, 최근 7일 기사 수" if news_count_map else "없음"),
         "macro": macro,
         "macro_note": "KODEX200 등 지수상품 보유 판단은 개별종목 공시/뉴스보다 이 매크로 지표(미국10년물·환율·코스피추세·외국인수급)가 더 설명력 있음",
+        "kodex200_holding": kodex200_holding,
         "disclaimer": "투자 자문 아님. 공개데이터 기반 단순 스크리닝. 투자 판단·손익 책임은 사용자.",
         "recommendations": recs,
     }
@@ -410,7 +438,12 @@ def main():
         json.dump(out, f, ensure_ascii=False, indent=2)
 
     print("저장 완료 -> kospi200_screen.json")
-    print(json.dumps(out, ensure_ascii=False, indent=2))
+    dump = json.dumps(out, ensure_ascii=False, indent=2)
+    try:
+        print(dump)
+    except UnicodeEncodeError:
+        # 콘솔 코드페이지(cp949 등)가 표현 못 하는 문자가 있어도 저장은 끝났으니 죽지 않게 처리.
+        print(dump.encode("ascii", errors="backslashreplace").decode("ascii"))
 
 
 if __name__ == "__main__":
