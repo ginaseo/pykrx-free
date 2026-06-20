@@ -23,3 +23,6 @@ kospi200_members.json
 
 # 개인 포트폴리오(보유종목·평단·해외종목). 형식은 README 참조
 portfolio.json
+
+# Claude 로컬 지시사항 (개인 설정, 커밋 불포함)
+CLAUDE.md
