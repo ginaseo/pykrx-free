@@ -340,8 +340,13 @@ def main():
 
     # === 6) 출력 ===
     final = cur.sort_values("score", ascending=False)
+    # 보유종목은 점수 순위와 무관하게 항상 포함(thesis 판단 노출 보장) + 비보유 상위 TOP_N
+    top_non_held = [c for c in final.index if c not in HELD][:TOP_N]
+    out_codes = sorted(set(top_non_held) | (HELD & set(final.index)),
+                        key=lambda c: -float(final.loc[c, "score"]))
     recs = []
-    for code, r in final.head(TOP_N + len(HELD)).iterrows():
+    for code in out_codes:
+        r = final.loc[code]
         recs.append({
             "code": code,
             "name": r.get("ISU_NM"),
