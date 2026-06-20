@@ -7,7 +7,7 @@ name = "krxbrief"
 version = "0.1.0"
 description = "KRX 모닝 브리핑 & 코스피200 스크리너"
 requires-python = ">=3.9"
-dependencies = ["pandas", "numpy", "requests", "python-dotenv", "yfinance"]
+dependencies = ["pandas", "numpy", "requests", "python-dotenv", "yfinance", "defusedxml"]
 
 [tool.setuptools.packages.find]
 include = ["krxfree*"]

@@ -7,11 +7,11 @@ Naver fchart 엔드포인트(count=기간형)를 직접 호출해 한 종목의 
 1콜로 받아 DataFrame 반환.
 """
 import datetime
-import xml.etree.ElementTree as ET
 
 import numpy as np
 import pandas as pd
 import requests
+from defusedxml import ElementTree as ET
 
 URL = "https://fchart.stock.naver.com/sise.nhn"
 UA = "Mozilla/5.0"

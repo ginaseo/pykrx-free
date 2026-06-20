@@ -284,7 +284,12 @@ def classify_disclosure(report_nm: str):
 
 
 def disclosures(corp_code: str, bgn_de: str, end_de: str):
-    """기간 내 공시 목록(list.json) 원본 리스트. 키 없거나 실패 시 []."""
+    """기간 내 공시 목록(list.json) 원본 리스트.
+
+    키 없으면 기능 OFF로 보고 []. 네트워크/파싱/예상밖 상태코드는 **None**(조회 실패 = 모름)
+    — "공시 없음"(013, 정상 응답)과 절대 같은 값으로 섞지 않는다. 호출부가 None 을
+    "위험 없음"으로 오인하면 안 되기 때문(예: API 장애 시 보유종목을 '양호'로 오판).
+    """
     key = _key()
     if not key or not corp_code:
         return []
@@ -295,17 +300,22 @@ def disclosures(corp_code: str, bgn_de: str, end_de: str):
         }, timeout=30)
         d = r.json()
     except Exception:
+        return None
+    if d.get("status") == "013":   # 013 = 조회된 데이터 없음(정상, 진짜 빈 결과)
         return []
-    if d.get("status") not in ("000", "013"):  # 013 = 조회된 데이터 없음
-        return []
+    if d.get("status") != "000":
+        return None
     return d.get("list") or []
 
 
 def disclosure_flags(corp_code: str, bgn_de: str, end_de: str):
     """기간 내 공시를 분류해 {"hard_negative": [...], "soft_negative": [...], "positive": [...]} 반환.
-    각 항목은 {"report_nm", "rcept_dt"}. 해당 없는 카테고리는 빈 리스트."""
+    각 항목은 {"report_nm", "rcept_dt"}. 조회 자체가 실패하면 **None**(disclosures 참조)."""
+    items = disclosures(corp_code, bgn_de, end_de)
+    if items is None:
+        return None
     out = {"hard_negative": [], "soft_negative": [], "positive": []}
-    for it in disclosures(corp_code, bgn_de, end_de):
+    for it in items:
         cat = classify_disclosure(it.get("report_nm") or "")
         if cat:
             out[cat].append({"report_nm": it.get("report_nm"), "rcept_dt": it.get("rcept_dt")})
@@ -314,7 +324,7 @@ def disclosure_flags(corp_code: str, bgn_de: str, end_de: str):
 
 # ---------- 유상증자/CB 상세 (Phase2: 배정방식 + 희석규모로 감점폭 세분화) ----------
 def capital_increase_items(corp_code: str, bgn_de: str, end_de: str):
-    """유상증자결정(piicDecsn) 상세 목록. 키 없거나 실패 시 []."""
+    """유상증자결정(piicDecsn) 상세 목록. 키 없으면 []. 조회 실패는 None(disclosures 참조)."""
     key = _key()
     if not key or not corp_code:
         return []
@@ -325,14 +335,16 @@ def capital_increase_items(corp_code: str, bgn_de: str, end_de: str):
         }, timeout=30)
         d = r.json()
     except Exception:
+        return None
+    if d.get("status") == "013":
         return []
-    if d.get("status") not in ("000", "013"):
-        return []
+    if d.get("status") != "000":
+        return None
     return d.get("list") or []
 
 
 def cb_issue_items(corp_code: str, bgn_de: str, end_de: str):
-    """전환사채권발행결정(cvbdIsDecsn) 상세 목록. 키 없거나 실패 시 []."""
+    """전환사채권발행결정(cvbdIsDecsn) 상세 목록. 키 없으면 []. 조회 실패는 None(disclosures 참조)."""
     key = _key()
     if not key or not corp_code:
         return []
@@ -343,9 +355,11 @@ def cb_issue_items(corp_code: str, bgn_de: str, end_de: str):
         }, timeout=30)
         d = r.json()
     except Exception:
+        return None
+    if d.get("status") == "013":
         return []
-    if d.get("status") not in ("000", "013"):
-        return []
+    if d.get("status") != "000":
+        return None
     return d.get("list") or []
 
 
@@ -368,10 +382,15 @@ def _cvbd_detail(item: dict):
 
 
 def dilution_flags(corp_code: str, bgn_de: str, end_de: str):
-    """기간 내 유상증자/CB 상세. {"capital_increase": [...], "convertible_bond": [...]}."""
+    """기간 내 유상증자/CB 상세. {"capital_increase": [...], "convertible_bond": [...]}.
+    둘 중 하나라도 조회 실패면 None(disclosures 참조)."""
+    ci = capital_increase_items(corp_code, bgn_de, end_de)
+    cb = cb_issue_items(corp_code, bgn_de, end_de)
+    if ci is None or cb is None:
+        return None
     return {
-        "capital_increase": [_piic_detail(it) for it in capital_increase_items(corp_code, bgn_de, end_de)],
-        "convertible_bond": [_cvbd_detail(it) for it in cb_issue_items(corp_code, bgn_de, end_de)],
+        "capital_increase": [_piic_detail(it) for it in ci],
+        "convertible_bond": [_cvbd_detail(it) for it in cb],
     }
 
 

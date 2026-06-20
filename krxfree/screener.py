@@ -264,25 +264,28 @@ def main():
             try:
                 flags = dart.disclosure_flags(cc, disc_bgn, today)
             except Exception:
-                flags = {"hard_negative": [], "soft_negative": [], "positive": []}
-            disclosure_map[code] = flags
-            if flags["hard_negative"] and code not in HELD:
-                excluded.add(code)
-            elif flags["soft_negative"]:
-                has_ci = any("유상증자결정" in (it.get("report_nm") or "") for it in flags["soft_negative"])
-                has_cb = any("전환사채권발행결정" in (it.get("report_nm") or "") for it in flags["soft_negative"])
-                if has_ci or has_cb:
-                    try:
-                        dil = dart.dilution_flags(cc, disc_bgn, today)
-                    except Exception:
-                        dil = {"capital_increase": [], "convertible_bond": []}
-                    if dil["capital_increase"] or dil["convertible_bond"]:
-                        flags["dilution"] = dil
-                    b += dart.dilution_severity(dil)
-                else:
-                    b -= 0.05  # 그 외 SOFT_NEGATIVE(교환사채 등)는 기존 고정 감점
-            if flags["positive"]:
-                b += 0.02
+                flags = None
+            disclosure_map[code] = flags   # None = 조회 실패(모름). "공시 없음"과 절대 혼동 금지.
+            if flags is not None:
+                if flags["hard_negative"] and code not in HELD:
+                    excluded.add(code)
+                elif flags["soft_negative"]:
+                    has_ci = any("유상증자결정" in (it.get("report_nm") or "") for it in flags["soft_negative"])
+                    has_cb = any("전환사채권발행결정" in (it.get("report_nm") or "") for it in flags["soft_negative"])
+                    if has_ci or has_cb:
+                        try:
+                            dil = dart.dilution_flags(cc, disc_bgn, today)
+                        except Exception:
+                            dil = None
+                        if dil is not None:
+                            if dil["capital_increase"] or dil["convertible_bond"]:
+                                flags["dilution"] = dil
+                            b += dart.dilution_severity(dil)
+                        # dil 조회 실패면 감점 보류(모르는 걸 페널티로 단정 안 함)
+                    else:
+                        b -= 0.05  # 그 외 SOFT_NEGATIVE(교환사채 등)는 기존 고정 감점
+                if flags["positive"]:
+                    b += 0.02
 
             if code in cur.index:
                 cur.loc[code, "score"] += b
@@ -291,16 +294,19 @@ def main():
         cur = cur.drop(index=[c for c in excluded if c in cur.index])
 
     # === 5-c) 뉴스 건수 (최근 7일, Google News RSS) — "재료 없는 변동성" 탐지용 ===
-    news_count_map = {}
+    news_count_map = {}   # 실패(None)는 저장 안 함 -> "확인 안 됨"과 "0건 확인"을 구분
     for code in dart_codes:
         nm = cur.loc[code, "ISU_NM"] if code in cur.index and "ISU_NM" in cur.columns else None
         if not nm or pd.isna(nm):
             continue
         try:
-            news_count_map[code] = news.count_recent(str(nm), days=7)
+            cnt = news.count_recent(str(nm), days=7)
         except Exception:
-            continue
+            cnt = None
+        if cnt is not None:
+            news_count_map[code] = cnt
 
+    enriched_codes = set(dart_codes)  # 공시/뉴스/펀더멘털 체크를 실제로 한 종목만 라벨링 대상
     MOMENTUM_HIGH_PCT = 15  # 이 이상 모멘텀이면 "왜 오르는지" 라벨링 대상
     NEWS_LOW_THRESHOLD = 2  # 최근 7일 기사 수 이하면 "뉴스로 설명 안 되는 변동" 신호
 
@@ -312,16 +318,21 @@ def main():
     def _momentum_label(code, mom_pct):
         if mom_pct is None or mom_pct < MOMENTUM_HIGH_PCT:
             return None
+        if code not in enriched_codes:
+            return None  # 공시/뉴스/실적 체크 자체를 안 한 종목 -> 모르면 라벨 안 닮(오탐 방지)
         if _growth_good(code):
             return "실적 동반 상승"
-        if disclosure_map.get(code, {}).get("positive"):
+        if (disclosure_map.get(code) or {}).get("positive"):
             return "공시 모멘텀"
-        if news_count_map.get(code, 0) <= NEWS_LOW_THRESHOLD:
+        nc = news_count_map.get(code)
+        if nc is not None and nc <= NEWS_LOW_THRESHOLD:
             return "원인 불명 변동성"
         return "재료 미확인 상승"
 
     def _thesis_status(code):
-        flags = disclosure_map.get(code, {})
+        flags = disclosure_map.get(code)
+        if flags is None:
+            return "확인 불가"  # 공시 조회 자체가 안 됨(미체크/API실패) -> "양호"로 단정 금지
         if flags.get("hard_negative"):
             return "재검토 필요"
         fin = fundamentals.get(code)
@@ -406,8 +417,9 @@ def main():
             } if code in fundamentals else None),
             "momentum_label": _momentum_label(
                 code, None if pd.isna(r["mom_pct"]) else float(r["mom_pct"])),
-            "disclosure": ({k: v for k, v in disclosure_map.get(code, {}).items() if v}
+            "disclosure": ({k: v for k, v in (disclosure_map.get(code) or {}).items() if v}
                             or None),
+            "disclosure_checked": disclosure_map.get(code) is not None,
             "thesis_status": (_thesis_status(code) if code in HELD else None),
             "news_count_7d": news_count_map.get(code),
         })
