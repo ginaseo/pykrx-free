@@ -135,44 +135,28 @@ corp_map.json / sector_map.json   DART 캐시 (자동 생성, gitignore)
 
 ### 프롬프트 예시
 
-**모닝 브리핑** (briefing_data.json 첨부 후):
+**모닝 브리핑 + 스크리너 분석** (briefing_data.json + kospi200_screen.json 첨부 후):
+> portfolio.json 이 없어도 두 파일은 정상 생성된다(보유종목 없는 상태로). 그 경우 1·2번은
+> 자연히 빈 결과로 건너가고 3~5번(스크리너 분석)만 의미 있게 동작한다.
 ```text
-첨부한 JSON은 오늘 아침 내 포트폴리오 데이터야.
-보유종목별 등락률·평가손익 요약하고,
-RSI·이동평균 기준으로 주의가 필요한 종목 있으면 짚어줘.
-```
+briefing_data.json = 내 현재 포트폴리오(시세·손익·기술적 지표)
+kospi200_screen.json = 오늘 코스피200 스크리닝 결과(팩터/공시/뉴스/매크로 포함)
 
-**스크리너 분석** (kospi200_screen.json 첨부 후):
-```text
-첨부한 JSON은 오늘 코스피200 스크리닝 결과야.
-상위 종목 중 팩터 균형이 좋은 것 위주로 설명해줘.
-특히 가치(PER/PBR)와 모멘텀이 함께 좋은 종목 있으면 강조해줘.
-```
-
-**공시/뉴스/매크로 반영 분석** (kospi200_screen.json 첨부 후, Phase1~3 필드 활용):
-```text
-첨부한 JSON은 오늘 코스피200 스크리닝 결과야. 각 종목의 momentum_label, disclosure,
-thesis_status, news_count_7d, 최상위 macro 섹션을 참고해서 다음을 알려줘.
-
-1. momentum_label이 "원인 불명 변동성"이거나 "재료 미확인 상승"인 종목은 따로 모아서
-   왜 그런지(뉴스 적음/실적 근거 없음) 짚어줘. 추격 매수 주의 종목으로 표시해줘.
-2. disclosure에 hard_negative/soft_negative/dilution(특히 제3자배정·일반공모)이 있는
-   종목은 경고로 따로 알려줘.
-3. held=true 종목 중 thesis_status가 "주의"나 "재검토 필요"인 게 있으면
-   투자 논리가 깨졌는지 설명해줘.
-4. kodex200_holding 섹션(보유 중이면 존재)이 있으면 close/nav/fluc_rt/momentum_pct를
+다음을 알려줘.
+1. 내 보유종목별 등락률·평가손익 요약하고, RSI·이동평균으로 주의 필요한 종목 짚어줘.
+2. 보유종목이 kospi200_screen.json의 recommendations에도 있는지 확인하고,
+   있으면 thesis_status·momentum_label·disclosure까지 같이 설명해줘.
+3. recommendations 상위 종목 중 팩터 균형이 좋은 것(가치 PER/PBR + 모멘텀이 함께 좋은
+   종목) 위주로 설명해줘. momentum_label도 같이 확인:
+   - "원인 불명 변동성"/"재료 미확인 상승"인 종목은 따로 모아서 왜 그런지(뉴스 적음/실적
+     근거 없음) 짚어주고 추격 매수 주의 종목으로 표시해줘.
+   - "실적 동반 상승"/"공시 모멘텀"인 종목은 근거를 같이 설명해줘.
+4. disclosure에 hard_negative/soft_negative/dilution(특히 제3자배정·일반공모)이 있는
+   종목은 경고로 따로 알려줘. disclosure_checked가 false인 종목은 "공시 미확인" 표시.
+5. kodex200_holding 섹션(보유 중이면 존재)이 있으면 close/nav/fluc_rt/momentum_pct를
    macro 섹션(us10y, usdkrw, kospi, foreign_netflow_7d_won)과 같이 보고 지금 환경이
    KODEX200 같은 지수상품 보유에 우호적인지 비우호적인지 한 줄로 평가해줘
    (개별 공시·뉴스는 ETF엔 적용 안 됨, macro로만 판단).
-```
-
-**두 파일 동시 활용**:
-```
-briefing_data.json = 내 현재 포트폴리오
-kospi200_screen.json = 오늘 스크리닝 추천 종목
-
-내 보유종목이 추천 목록에 있는지 확인하고,
-추천 종목 중 내가 안 들고 있는 것 중 주목할 만한 것 알려줘.
 ```
 
 ### 자동 브리핑 (Claude Cowork 반복 작업 예약)
