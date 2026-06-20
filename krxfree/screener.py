@@ -29,6 +29,7 @@ except Exception:
     pass
 
 from .clients import naver, login, openapi, news
+from .clients import macro as macro_client
 try:
     from .clients import dart
 except Exception:
@@ -329,6 +330,14 @@ def main():
             return "주의"
         return "양호"
 
+    # === 5-d) ETF/지수상품 보유 판단용 매크로 (개별종목 무관, 1회만 계산) ===
+    macro = {
+        "us10y": macro_client.us10y_trend(),
+        "usdkrw": macro_client.usdkrw_trend(),
+        "kospi": macro_client.kospi_trend(),
+        "foreign_netflow_7d_won": macro_client.foreign_netflow(session, days=7),
+    }
+
     # === 6) 출력 ===
     final = cur.sort_values("score", ascending=False)
     recs = []
@@ -387,6 +396,8 @@ def main():
         "disclosure_source": ("OpenDART 공시검색 최근 30일 (강한 악재=신규후보 제외, 중간 악재=감점, 호재=가점)"
                               if disclosure_map else "없음"),
         "news_source": ("Google News RSS 종목명 검색, 최근 7일 기사 수" if news_count_map else "없음"),
+        "macro": macro,
+        "macro_note": "KODEX200 등 지수상품 보유 판단은 개별종목 공시/뉴스보다 이 매크로 지표(미국10년물·환율·코스피추세·외국인수급)가 더 설명력 있음",
         "disclaimer": "투자 자문 아님. 공개데이터 기반 단순 스크리닝. 투자 판단·손익 책임은 사용자.",
         "recommendations": recs,
     }
