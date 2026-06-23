@@ -49,7 +49,7 @@ python -m venv .venv
 # macOS/Linux
 source .venv/bin/activate
 
-pip install -r requirements.txt
+pip install -e .
 ```
 
 ---
@@ -105,18 +105,20 @@ krxfree/                     패키지
 └─ clients/
    ├─ naver.py               Naver OHLCV (무인증)
    ├─ openapi.py             KRX 공식 OpenAPI — 지수·전종목 시세 (인증키)
-   ├─ login.py               KRX 로그인 — PER/PBR·지수구성종목 (로그인)
-   └─ dart.py                OpenDART — 성장률/ROE/부채/업종 (인증키)
+   ├─ login.py               KRX 로그인 — PER/PBR·지수구성종목·외국인수급 (로그인)
+   ├─ dart.py                OpenDART — 성장률/ROE/부채/업종/공시/유증·CB 상세 (인증키)
+   ├─ news.py                Google News RSS — 종목명 최근 기사 수 (무인증)
+   └─ macro.py               미국10년물·달러원(FRED)·코스피추세·외국인수급 — ETF 보유 판단용
 automation/                  run_morning.ps1 · register_krx_task.ps1 / .bat
 docs/DESIGN.md               설계 원칙·판단요소·의사결정 기록
 results/                     산출 JSON (자동 생성, 내용물 gitignore)
 portfolio.json[.example]     보유종목 입력(.example=양식). 입력은 gitignore
 .env[.example]               자격증명·인증키(.example=양식). .env 커밋 금지
-requirements.txt             의존 패키지
+pyproject.toml               의존 패키지(dependencies) + 빌드 설정
 corp_map.json / sector_map.json   DART 캐시 (자동 생성, gitignore)
 ```
 
-**의존 패키지** (`requirements.txt`): `pandas` · `numpy` · `requests` · `python-dotenv` · `yfinance`(미국 시세, 미설치 시 해당 항목 생략). 그 외는 표준 라이브러리.
+**의존 패키지** (`pyproject.toml`): `pandas` · `numpy` · `requests` · `python-dotenv` · `yfinance`(미국 시세, 미설치 시 해당 항목 생략) · `defusedxml`(RSS 파싱). 그 외는 표준 라이브러리.
 
 **호출량(1회)**: KRX OpenAPI 2~5콜 · KRX 로그인 1회(PER/PBR+구성종목) · Naver ~25콜 · DART ~25콜(캐시) · company.json ~25콜(업종, 캐시).
 
