@@ -273,8 +273,12 @@ def main():
                     has_ci = any("유상증자결정" in (it.get("report_nm") or "") for it in flags["soft_negative"])
                     has_cb = any("전환사채권발행결정" in (it.get("report_nm") or "") for it in flags["soft_negative"])
                     if has_ci or has_cb:
+                        # 정정공시는 30일 안에 보여도 원결정(배정방식·희석률)은 그보다 훨씬
+                        # 전일 수 있음(유상증자는 결정->효력발생까지 수개월) -> 1년 범위로 재조회.
+                        dil_bgn = (datetime.datetime.strptime(today, "%Y%m%d")
+                                   - datetime.timedelta(days=365)).strftime("%Y%m%d")
                         try:
-                            dil = dart.dilution_flags(cc, disc_bgn, today)
+                            dil = dart.dilution_flags(cc, dil_bgn, today)
                         except Exception:
                             dil = None
                         if dil is not None:
