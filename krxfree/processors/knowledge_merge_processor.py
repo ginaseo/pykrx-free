@@ -53,6 +53,10 @@ def process(code):
     merged.update({k: v for k, v in manual.items() if v not in (None, [], {}) and k != "investment_cases"})
 
     merged["timeline"] = _dedup_timeline(generated.get("timeline", []))
+    # digest 는 파이프라인상 summary_processor 가 이 다음 단계에서 채운다(merged.json 기준으로
+    # 재계산). 아직 안 돌았을 독립 실행 대비 폴백만 유지(내부 변경감지용 _source_ids 는 제외).
+    merged.setdefault("digest", [{k: v for k, v in d.items() if not k.startswith("_")}
+                                  for d in generated.get("digest", [])])
     merged.setdefault("investment_cases", generated.get("investment_cases", []))
     merged.setdefault("version", "1.0")
     merged["last_updated"] = datetime.datetime.now().isoformat(timespec="seconds")

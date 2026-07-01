@@ -19,6 +19,7 @@ import datetime
 
 from ..paths import company_knowledge_path
 from .registry import register
+from .tags import match_tags
 
 
 def _status_from_score(score):
@@ -50,7 +51,8 @@ def _compute_case(cdef, timeline, today):
                if any(kw in ((e.get("reason") or "") + (e.get("report_nm") or "")) for kw in keywords)]
     if not matched:
         return {"name": name, "status": "MAINTAINED", "importance": importance, "trend": "FLAT",
-                "reason": None, "last_updated": None, "case_status": "ACTIVE"}
+                "reason": None, "last_updated": None, "case_status": "ACTIVE",
+                "tags": match_tags(name + " " + " ".join(keywords))}
 
     score = sum(e.get("impact_score") or 0 for e in matched)
     status = _status_from_score(score)
@@ -64,11 +66,12 @@ def _compute_case(cdef, timeline, today):
         trend = "FLAT"
     case_status = "INACTIVE" if (days_ago is not None and days_ago > 365) else "ACTIVE"
     reasons = list(dict.fromkeys(e.get("reason") for e in matched if e.get("reason")))[:3]
+    tags = match_tags(name + " " + " ".join(keywords))
     return {
         "name": name, "status": status, "importance": importance, "trend": trend,
         "reason": ", ".join(reasons) if reasons else None,
         "last_updated": f"{latest_dt[:4]}-{latest_dt[4:6]}-{latest_dt[6:]}" if latest_dt else None,
-        "case_status": case_status,
+        "case_status": case_status, "tags": tags,
     }
 
 
@@ -85,6 +88,8 @@ def process(code):
     out = [_compute_case(cdef, timeline, today) for cdef in case_defs if cdef.get("name") and cdef.get("keywords")]
 
     merged["investment_cases"] = out
+    # 회사 단위 태그 = 모든 case 태그의 합집합. Context Builder(보류) 의 입력값 준비 단계.
+    merged["tags"] = sorted({t for c in out for t in c.get("tags", [])})
     merged["last_updated"] = datetime.datetime.now().isoformat(timespec="seconds")
     p = company_knowledge_path(code, "merged.json")
     with open(p, "w", encoding="utf-8") as f:

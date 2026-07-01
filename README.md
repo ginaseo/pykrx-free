@@ -6,7 +6,7 @@
 
 > ⚠️ **면책**: 투자 자문이 아니다. 공개 데이터 기반 단순 스크리닝이며, 모든 투자 판단·손익 책임은 사용자에게 있다.
 >
-> 설계 원칙·판단 기준·의사결정 근거는 [docs/DESIGN.md](docs/DESIGN.md) 참조. 출력 수치는 **실측값(또는 보편식 파생)만** 쓰고 추측·근사는 넣지 않는다.
+> 설계 원칙·판단 기준·의사결정 근거는 [docs/DESIGN.md](docs/DESIGN.md), 전체 시스템 구조(Layer·데이터 흐름·Processor 확장법)는 [ARCHITECTURE.md](ARCHITECTURE.md) 참조. 출력 수치는 **실측값(또는 보편식 파생)만** 쓰고 추측·근사는 넣지 않는다.
 
 ---
 
@@ -56,6 +56,17 @@
 - `status`/`trend`/`reason`은 매칭된 실제 공시의 `impact_score`·날짜로만 계산(LLM 추론 없음, 재현 가능).
 - `founder`/`ceo`/`website`/`products`/`competitors` 같은 필드도 같은 방식으로 `manual.json` 에 채워 넣으면
   `merged.json` 에 최우선으로 반영된다(DART 가 안 주는 정보라 자동 채움은 없음).
+
+### Timeline Digest
+
+`merged.json` 의 `digest` 는 timeline 을 월/분기/연 단위로 압축한 것(자연어 요약 아님 — 브리핑
+작성 시 LLM 이 이걸 읽고 문장을 만든다). 묶는 단위·기간별 최대 이벤트 수는 `config/digest_rules.json`
+에서 바꾼다(코드 수정 불필요):
+
+```json
+{"period_unit": "month", "max_events_per_period": 5, "include_event_types": null,
+ "exclude_event_types": [], "sort": "desc"}
+```
 
 ---
 
