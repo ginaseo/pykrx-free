@@ -130,11 +130,11 @@ def financials(corp_code: str, year: int, reprt="11011"):
         rows = d.get("list", [])
         rev_t, rev_p = _pick(rows, *(_ACC["revenue"]))
         op_t, op_p = _pick(rows, *(_ACC["op"]))
-        ni_t, _ = _pick(rows, *(_ACC["ni"]))
-        eq_t, _ = _pick(rows, *(_ACC["equity"]))
-        li_t, _ = _pick(rows, *(_ACC["liab"]))
-        ni_o, _ = _pick(rows, *(_ACC["ni_owner"]))
-        eq_o, _ = _pick(rows, *(_ACC["eq_owner"]))
+        ni_t, ni_t_p = _pick(rows, *(_ACC["ni"]))
+        eq_t, eq_t_p = _pick(rows, *(_ACC["equity"]))
+        li_t, li_t_p = _pick(rows, *(_ACC["liab"]))
+        ni_o, ni_o_p = _pick(rows, *(_ACC["ni_owner"]))
+        eq_o, eq_o_p = _pick(rows, *(_ACC["eq_owner"]))
         if not any([rev_t, op_t, ni_t, eq_t]):
             continue
 
@@ -146,6 +146,9 @@ def financials(corp_code: str, year: int, reprt="11011"):
         # PER/PBR 계산은 지배주주 기준 우선(없으면 전체) -> KRX 공식값과 정합
         ni_for_eps = ni_o if ni_o is not None else ni_t
         eq_for_bps = eq_o if eq_o is not None else eq_t
+        # 전기(frmtrm) 지배주주 순이익/자본 -> ROE 전년 대비 개선 판정용(같은 API 응답에 이미 포함된 값, 추가 호출 없음)
+        ni_for_eps_p = ni_o_p if ni_o_p is not None else ni_t_p
+        eq_for_bps_p = eq_o_p if eq_o_p is not None else eq_t_p
 
         return {
             "fs": fs, "year": year,
@@ -159,8 +162,61 @@ def financials(corp_code: str, year: int, reprt="11011"):
                         if ni_for_eps is not None and eq_for_bps not in (None, 0) else None),
             "debt_ratio_pct": (round(li_t / eq_t * 100, 1)
                                if li_t is not None and eq_t not in (None, 0) else None),
+            "roe_prev_pct": (round(ni_for_eps_p / eq_for_bps_p * 100, 1)
+                             if ni_for_eps_p is not None and eq_for_bps_p not in (None, 0) else None),
+            "debt_ratio_prev_pct": (round(li_t_p / eq_t_p * 100, 1)
+                                    if li_t_p is not None and eq_t_p not in (None, 0) else None),
         }
     return None
+
+
+def fin_events(fin: dict):
+    """재무제표 기반 Thesis 이벤트(ROE 개선/부채 감소). 전기 대비 실측 비교만 사용(추정 없음).
+
+    ponytail: 배당확대·실적서프라이즈·ROIC·FCF·현금흐름개선은 이번 버전 제외 —
+    배당 방향(원문 파싱 필요)/컨센서스(데이터 없음)/ROIC·FCF(현금흐름표 계정 매핑 미비)라
+    근사 없이는 계산 불가. 향후 계정 매핑·API 확장 시 추가.
+    날짜는 rcept_dt 형식(YYYYMMDD)에 맞춰 사업연도 말일(YYYY1231)로 부여 —
+    공시 이벤트와 동일한 decay/타임라인 로직을 그대로 태울 수 있게.
+    """
+    if not fin:
+        return []
+    out = []
+    year = fin.get("year")
+    fy_end = f"{year}1231" if year else None
+    if not fy_end:
+        return []
+    roe_p, roe_c = fin.get("roe_prev_pct"), fin.get("roe_pct")
+    if roe_p is not None and roe_c is not None and (roe_c - roe_p) >= 1:
+        out.append({
+            "report_nm": f"{year} 사업보고서(ROE {roe_p}%→{roe_c}%)", "rcept_dt": fy_end,
+            "rcept_no": None, "dart_link": None, "event_type": "roe_improvement",
+            "level": "A", "confidence": "HIGH", "classification": "DART",
+            "severity": 2, "impact_score": 1, "reason": "ROE 개선",
+        })
+    dr_p, dr_c = fin.get("debt_ratio_prev_pct"), fin.get("debt_ratio_pct")
+    if dr_p is not None and dr_c is not None and (dr_p - dr_c) >= 10:
+        out.append({
+            "report_nm": f"{year} 사업보고서(부채비율 {dr_p}%→{dr_c}%)", "rcept_dt": fy_end,
+            "rcept_no": None, "dart_link": None, "event_type": "debt_reduction",
+            "level": "A", "confidence": "HIGH", "classification": "DART",
+            "severity": 2, "impact_score": 2, "reason": "부채 감소",
+        })
+    return out
+
+
+def dilution_extra_penalty(pct):
+    """유상증자 희석률 구간별 추가 감점(유상증자 자체 감점과 별개 -> Thesis contributors 에
+    별도 항목으로 노출). 10~20%: -1, 20~30%: -2, 30%↑: -3. 10% 미만은 추가 감점 없음."""
+    if pct is None:
+        return 0
+    if pct >= 30:
+        return -3
+    if pct >= 20:
+        return -2
+    if pct >= 10:
+        return -1
+    return 0
 
 
 # ---------- 업종 분류 (company.json 의 induty_code = KSIC) ----------
@@ -385,6 +441,7 @@ def disclosure_flags(corp_code: str, bgn_de: str, end_de: str):
             "rcept_dt": it.get("rcept_dt"),
             "rcept_no": rcept_no,
             "dart_link": dart_link(rcept_no),
+            "event_type": ev["event_type"],
             "level": ev["level"], "confidence": ev["confidence"], "classification": ev["classification"],
             "severity": ev["severity"], "impact_score": ev["impact_score"], "reason": ev["reason"],
         })

@@ -270,6 +270,11 @@ def main():
             except Exception:
                 flags = None
             disclosure_map[code] = flags   # None = 조회 실패(모름). "공시 없음"과 절대 혼동 금지.
+            if flags is not None and fin:
+                # 재무제표 기반 Thesis 이벤트(ROE 개선/부채 감소) -> 공시와 동일한 dart 버킷에 편입
+                # (rcept_no 없어 dedup·오늘 신규 판정 대상은 아니고, 날짜 기반 rolling 집계에만 반영).
+                for fe in dart.fin_events(fin):
+                    flags["dart"].setdefault(fe["event_type"], []).append(fe)
             if flags is not None:
                 types_present = dart.event_types_present(flags)
                 hard_present = bool(types_present & dart.HARD_EXCLUDE_TYPES)
@@ -282,7 +287,9 @@ def main():
                             flags["unfaithful_repeat_5y"] = None
                     if code not in HELD:
                         excluded.add(code)
-                elif types_present & dart.SOFT_PENALTY_TYPES:
+                if types_present & dart.SOFT_PENALTY_TYPES:
+                    # hard_negative 와 별개로 항상 확인 -> 보유종목이 불성실공시+유상증자를 동시에
+                    # 안고 있어도 희석률 상세가 Thesis 엔진에서 누락되지 않게(예: 한화솔루션 실측).
                     if types_present & {"capital_increase", "cb_issue"}:
                         # 정정공시는 조회기간 안에 보여도 원결정(배정방식·희석률)은 그보다 훨씬
                         # 전일 수 있음(유상증자는 결정->효력발생까지 수개월) -> 1년 범위로 재조회.
@@ -295,6 +302,20 @@ def main():
                             if dil["capital_increase"] or dil["convertible_bond"]:
                                 flags["dilution"] = dil
                             b += dart.dilution_severity(dil)
+                            if dil.get("capital_increase"):
+                                # 희석률 구간별 추가 감점 -> "유상증자"와 별개 항목으로 contributors 에 노출
+                                max_pct = max((ci.get("dilution_pct") or 0) for ci in dil["capital_increase"])
+                                extra = dart.dilution_extra_penalty(max_pct)
+                                if extra != 0:
+                                    ci_dates = [it.get("rcept_dt")
+                                                for it in flags["dart"].get("capital_increase", [])]
+                                    latest_dt = max(ci_dates) if ci_dates else today
+                                    flags["dart"].setdefault("dilution_penalty", []).append({
+                                        "report_nm": f"유상증자 희석률 {max_pct:.0f}%", "rcept_dt": latest_dt,
+                                        "rcept_no": None, "dart_link": None, "event_type": "dilution_penalty",
+                                        "level": "A", "confidence": "HIGH", "classification": "DART",
+                                        "severity": 2, "impact_score": extra, "reason": f"희석률 {max_pct:.0f}%",
+                                    })
                         # dil 조회 실패면 감점 보류(모르는 걸 페널티로 단정 안 함)
                     else:
                         b -= 0.05  # BW/최대주주변경 등 세부 조회 없는 SOFT_PENALTY 는 기존 고정 감점
@@ -369,13 +390,47 @@ def main():
         return {"level": "INFO", "items": []}
 
     def _buffett_lens(today_score, rolling_30d, reasons):
+        """규칙 기반(LLM 생성 아님). 부정 분기는 신뢰도/자본배분 우선점검, 긍정 분기는 근거(주주환원/
+        자본배분 개선)에 따라 세분화. 경제적해자/현금창출력/안전마진 등은 FCF·내재가치 데이터가 없어
+        이번 버전에서 규칙화 보류(DESIGN.md 참조) — 근거 없는 문구를 강제로 만들지 않는다."""
         if today_score <= -5 or rolling_30d <= -8:
             return "경영진 신뢰도와 자본배분 정책을 우선 점검하세요."
         if rolling_30d >= 8:
-            if any("자사주" in r or "배당" in r for r in reasons):
-                return "자사주 소각·배당 확대 등 주주환원이 이어지고 있습니다 — 장기 경쟁우위 유지 여부를 지속 확인하세요."
+            shareholder_return = any("자사주" in r for r in reasons)
+            capital_alloc = any(r in ("부채 감소", "ROE 개선") for r in reasons)
+            if shareholder_return and capital_alloc:
+                return "주주환원과 자본배분이 함께 개선되고 있습니다 — 경제적 해자가 유지되는지 계속 확인하세요."
+            if shareholder_return:
+                return "자사주 매입·소각 등 주주환원이 강화되고 있습니다 — 장기 경쟁우위 유지 여부를 지속 확인하세요."
+            if capital_alloc:
+                return "부채 감소·ROE 개선 등 자본배분이 개선되고 있습니다 — 실적 개선 지속 여부를 확인하세요."
             return "주주환원 정책과 경제적 해자가 유지되는지 확인하세요."
         return None
+
+    _STATE_RANK = {"BROKEN": 0, "WEAKENED": 1, "MAINTAINED": 2, "STRENGTHENED": 3, "STRONGLY_STRENGTHENED": 4}
+
+    def _thesis_change(prev_thesis_entry, new_state):
+        """전일 state 대비 변화 감지. UNCONFIRMED 가 얽히면 방향 판단 보류(모르는 걸 개선/악화로 단정 안 함)."""
+        prev_state_str = (prev_thesis_entry or {}).get("state")
+        if not prev_state_str or prev_state_str == "UNCONFIRMED" or new_state == "UNCONFIRMED":
+            return {"prev_state": prev_state_str, "changed": False, "direction": None, "alert": None}
+        changed = prev_state_str != new_state
+        direction = alert = None
+        if changed:
+            pr, nr = _STATE_RANK.get(prev_state_str), _STATE_RANK.get(new_state)
+            if pr is not None and nr is not None:
+                if nr > pr:
+                    direction, alert = "IMPROVED", "✅ 투자 Thesis 개선"
+                elif nr < pr:
+                    direction, alert = "WORSENED", "🚨 투자 Thesis 변경"
+        return {"prev_state": prev_state_str, "changed": changed, "direction": direction, "alert": alert}
+
+    def _trend_arrow(score):
+        if score >= 2:
+            return "↗ 강화"
+        if score <= -2:
+            return "↘ 약화"
+        return "→ 유지"
 
     def _decay_weight(days_ago):
         """30일=100%/90일=70%/180일=40%/365일=20% — 오래된 이벤트일수록 rolling_365d 기여도 감소."""
@@ -414,6 +469,8 @@ def main():
                 "buffett_lens": None, "confidence": 0.0, "low_confidence": True,
                 "last_changed": None, "last_changed_days_ago": None, "timeline": [],
                 "summary": _SUMMARY_LEAD["UNCONFIRMED"] + ".",
+                "change": _thesis_change((prev_state.get("thesis") or {}).get(code), "UNCONFIRMED"),
+                "trend": {"30d": None, "365d": None}, "investment_case": [],
             }
             continue
 
@@ -502,6 +559,9 @@ def main():
             "buffett_lens": buffett_lens, "confidence": confidence, "low_confidence": confidence < 0.5,
             "last_changed": _fmt_date(last_evt_dt), "last_changed_days_ago": last_changed_days_ago,
             "timeline": timeline, "summary": _thesis_summary(state, reasons, buffett_lens),
+            "change": _thesis_change((prev_state.get("thesis") or {}).get(code), state),
+            "trend": {"30d": _trend_arrow(rolling_30d), "365d": _trend_arrow(rolling_365d)},
+            "investment_case": [],  # 스키마만 준비(향후 종목별 투자 근거별 강화/유지/약화 평가 추가 예정)
         }
         new_state_thesis[code] = {"today": today_score, "rolling_30d": rolling_30d, "rolling_365d": rolling_365d,
                                    "state": state}
@@ -511,6 +571,34 @@ def main():
         "disclosures": {**prev_disclosures, **new_state_disclosures},
         "thesis": {**(prev_state.get("thesis") or {}), **new_state_thesis},
     })
+
+    # === Portfolio Health (보유종목 Thesis 분포 + 업종 집중도) ===
+    # ponytail: ETF 비중/현금 비중은 portfolio.json 의 평가금액(briefing_data.json 소관) 이 있어야
+    # 계산 가능 -> 이 스크립트(kospi200_screen.json) 만으로는 불가, 이번 버전 제외(향후 두 산출물
+    # 합산 스크립트 필요). 아래는 Thesis 상태 분포 + 업종 집중도만(이 파일 데이터로 재현 가능한 것만).
+    _confirmed = {c: t for c, t in thesis_map.items() if t.get("state") != "UNCONFIRMED"}
+    if _confirmed:
+        n = len(_confirmed)
+        strengthened = sum(1 for t in _confirmed.values()
+                            if t["state"] in ("STRENGTHENED", "STRONGLY_STRENGTHENED"))
+        weakened = sum(1 for t in _confirmed.values() if t["state"] == "WEAKENED")
+        broken = sum(1 for t in _confirmed.values() if t["state"] == "BROKEN")
+        health_score = max(0, min(100, 100 - broken * 25 - weakened * 10 + strengthened * 5))
+        sector_counts = {}
+        for c in _confirmed:
+            s = sectors.get(c)
+            if s:
+                sector_counts[s] = sector_counts.get(s, 0) + 1
+        top_sector_pct = (round(max(sector_counts.values()) / sum(sector_counts.values()) * 100, 1)
+                           if sector_counts else None)
+        portfolio_health = {
+            "score": health_score, "holdings_checked": n,
+            "strengthened_count": strengthened, "weakened_count": weakened, "broken_count": broken,
+            "top_sector_concentration_pct": top_sector_pct,
+            "note": "ETF·현금 비중은 이 산출물(kospi200_screen.json)만으로 계산 불가 -> 미포함",
+        }
+    else:
+        portfolio_health = None
 
     enriched_codes = set(dart_codes)  # 공시/뉴스/펀더멘털 체크를 실제로 한 종목만 라벨링 대상
     MOMENTUM_HIGH_PCT = 15  # 이 이상 모멘텀이면 "왜 오르는지" 라벨링 대상
@@ -628,6 +716,9 @@ def main():
 
     out = {
         "generated": now.strftime("%Y-%m-%d %H:%M KST"),
+        "schema_version": "2.0",          # JSON 구조 버전. 필드 구조 변경 시에만 증가.
+        "thesis_engine_version": "3.0",   # Thesis 점수 계산 규칙 버전. 산정 방식 변경 시에만 증가.
+        "portfolio_health": portfolio_health,
         "as_of": today,
         "momentum_base": past_dd,
         "universe": universe_label,
