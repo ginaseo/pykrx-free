@@ -17,6 +17,7 @@ __pycache__/
 corp_map.json
 sector_map.json
 results/*.json
+results/portfolio_snapshot/*.json
 
 # KRX 코스피200 구성종목 명단(사용자 데이터). 형식은 krx_screener_api.py 상단 주석 참조
 kospi200_members.json

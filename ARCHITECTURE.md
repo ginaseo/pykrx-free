@@ -18,16 +18,18 @@ Knowledge Engine       (krxfree/processors/* → knowledge/company/{code}/*.json
         ↓
 Search Layer           (krxfree/search/* — Knowledge 를 검색하는 공통 API, 지금은 키워드 검색)
         ↓
-Portfolio Intelligence Engine   ← 예정(Phase2.5, 미구현)
+Portfolio Intelligence Engine   (krxfree/portfolio_engine.py → results/portfolio_snapshot/*.json)
         ↓
 Briefing Generator             ← 예정(Phase3.5, 미구현 — 지금은 AI가 JSON을 직접 읽어 브리핑 작성)
+        ↓
+Hermes Integration              ← 예정(Contract 만 설계, docs/HERMES_CONTRACT.md 참조 — 구현 없음)
         ↓
 Slack / Web / Mobile           ← 예정(미구현)
 ```
 
-**지금 실제로 도는 것은 위쪽 4단(Collection → Thesis → Knowledge → Search)까지다.** Portfolio
-Intelligence 이후는 로드맵이고 아직 코드가 없다 — 이 문서에서 "예정"이라고 명시한 부분은 존재하지
-않는 것으로 간주할 것.
+**지금 실제로 도는 것은 위쪽 5단(Collection → Thesis → Knowledge → Search → Portfolio
+Intelligence)까지다.** Briefing Generator 이후는 로드맵이고 아직 코드가 없다 — 이 문서에서
+"예정"이라고 명시한 부분은 존재하지 않는 것으로 간주할 것.
 
 ---
 
@@ -129,14 +131,31 @@ EmbeddingSearchBackend / HybridSearchBackend
   10,000개↑, 자연어 질의응답 필요, Keyword Search 한계 확인, 임베딩 API 확보 중 하나) 명시.
   조건이 차면 `default_engine()` 의 백엔드만 바꾸면 되고, `SearchEngine` 호출부는 안 바뀐다.
 
-### 5. Portfolio Intelligence Engine — 예정(Phase2.5)
-보유종목 개별이 아니라 포트폴리오 전체(업종 집중도·ETF/현금 비중·Correlation·Diversification)를
-분석. 아직 미구현.
+### 5. Portfolio Intelligence Engine (`krxfree/portfolio_engine.py`)
+종목 개별이 아니라 포트폴리오 전체 관점 진단. 새 데이터를 수집하지 않고 이미 만든 산출물만
+조합 — `results/kospi200_screen.json`(Thesis·sector·PER/PBR/DIV) + `results/briefing_data.json`
+(포지션 시세) + Search Layer(Knowledge 태그, **직접 파일을 읽지 않고 반드시 Search 경유**).
+
+- **계산 항목**: `portfolio_health`(Thesis Engine 값 재사용), `sector_allocation`(업종·국가·ETF
+  비중, 평가금액 가중), `theme_exposure`(산업 태그 + PER/PBR/DIV/성장률 기반 스타일 태그: 배당/
+  Value/성장), `thesis_distribution`(상태별 종목수·비중), `risk`(훼손·약화 종목 비중 기반
+  참고 지표), `diversification`(업종 HHI 기반 근사), `actions`(WARNING/CRITICAL thesis.action
+  모음).
+- **의도적으로 계산 안 함**: 현금 비중(portfolio.json 에 현금 필드 없음), 종목간 Correlation
+  (가격 시계열 전체 재계산 필요 — 범위 밖, 필요성 확인되면 추가).
+- **Snapshot**: `results/portfolio_snapshot/YYYY-MM-DD.json` 하루 1회 생성, 기존 파일 삭제
+  없음(누적 History). 직전 날짜 스냅샷과 비교해 `change_vs_prev`(health/risk/diversification
+  delta) 자동 계산.
 
 ### 6. Briefing Generator — 예정(Phase3.5)
-`results/*.json` + `knowledge/company/*/merged.json` + (향후) Portfolio Intelligence 결과를
+`results/*.json` + `knowledge/company/*/merged.json` + Portfolio Intelligence 결과를
 LLM 이 함께 읽어 최종 브리핑 문장을 생성. 지금은 이 역할을 AI(Claude 등)가 JSON 을 직접
 읽어 대체 수행 중(README.md 프롬프트 예시 참조).
+
+### 7. Hermes Integration — 예정(Contract 만 설계, 구현 없음)
+Engine 이 아니라 Integration Layer. Portfolio Intelligence + Briefing Generator 완성 후
+가장 마지막에 구현. API 계약(입출력)만 [docs/HERMES_CONTRACT.md](docs/HERMES_CONTRACT.md)
+에 미리 고정해 둠 — 지금은 코드 없음.
 
 ---
 

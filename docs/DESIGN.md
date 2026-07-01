@@ -378,6 +378,31 @@ FAISS 추상화·BM25 하이브리드를 넣는 건 JSON 파일 몇 개 grep 하
 - **실측 검증**: `krxfree.search.engine` 로 "유상증자" 검색 → 한화솔루션 digest chunk 3건
   정상 반환(관련도순), `company_code=009830 & chunk_type=digest` 필터로 4건(전체) 반환 확인.
 
+### Phase4 — Portfolio Intelligence Engine + Snapshot, Hermes Contract(설계만) (2026-07-01)
+새 데이터 수집 없이 기존 산출물(Thesis Engine·Collection Layer·Search Layer)만 조합.
+
+- **`krxfree/portfolio_engine.py`**: `results/kospi200_screen.json`(thesis/sector/PER/PBR/DIV) +
+  `results/briefing_data.json`(포지션 시세) + Search Layer(태그, **merged.json 직접 안 읽고
+  `krxfree.search.engine` 경유** — 사용자가 명시적으로 요구한 "Portfolio ↓ Search ↓ Knowledge"
+  원칙).
+  - `sector_allocation`: 포지션 평가금액(`current*shares`, 없으면 `avg*shares` 근사) 가중
+    업종/국가/ETF 비중. 평가금액 자체를 못 구하면(시세 없음 등) `None`(추측 금지).
+  - `theme_exposure`: 산업 태그(Knowledge, Search 경유) + 스타일 태그(배당=DIV≥2%,
+    Value=PER<10 또는 PBR<1, 성장=영업이익·매출성장률≥15% — 전부 실측 필드 규칙, 새 데이터 아님).
+  - `risk`/`diversification`: `risk_score`=훼손·약화 종목 비중 기반 내부 참고치, `diversification`
+    =업종 HHI(허핀달-허쉬만지수) 기반 근사.
+  - **의도적으로 미계산**: 현금 비중(portfolio.json 에 현금 필드 자체 없음), 종목간 Correlation
+    (보유종목 전체 가격 시계열 재계산이 필요한 별도 규모 작업 — 필요성 확인되면 추가).
+- **Portfolio Snapshot**: `results/portfolio_snapshot/YYYY-MM-DD.json`, 하루 1회, 기존 파일
+  삭제 없음(누적 History). 직전 날짜 스냅샷 대비 `change_vs_prev`(health/risk/diversification
+  delta) 자동 계산. `.gitignore` 에 추가(개인 포트폴리오 데이터, 기존 `results/*.json` 과 동일 취급).
+- **Hermes Contract**: 사용자가 "이번엔 구현하지 말고 API 계약만 문서화"라고 명시 — 실제
+  코드 없이 `docs/HERMES_CONTRACT.md` 에 함수 시그니처·반환값·소스만 표로 정리(READ 전용 원칙).
+- **실측 검증**: 실제 실행 → `sector_allocation.by_sector_pct`(제조33.1/기타29.2/정보통신37.8),
+  `etf_pct=29.2`, `theme_exposure`(성장 3종목/배당 1종목/Value 1종목), `risk_score=40.0`,
+  `diversification_score=66.2` 정상 산출. 가짜 전일 스냅샷(health 77→80, risk 30→40)을 임시로
+  넣어 `change_vs_prev` delta(+3/+10/0) 정확히 계산되는지 확인 후 테스트 파일 정리.
+
 ---
 
 ## 한계 / 확장 여지
