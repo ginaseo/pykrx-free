@@ -1,0 +1,7 @@
+{
+  "period_unit": "month",
+  "max_events_per_period": 5,
+  "include_event_types": null,
+  "exclude_event_types": [],
+  "sort": "desc"
+}

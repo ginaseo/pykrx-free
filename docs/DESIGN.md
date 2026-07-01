@@ -132,6 +132,315 @@
 
 **변경 이유**: 사용자가 "점수보다 왜 그 점수인지가 중요"하다고 판단. 라벨/경고를 점수와 분리해 설명가능성을 높이고, 추측성 분류(예: 단일판매계약 금액 추정)는 검증 안 된 API 필드를 쓰지 않는 [데이터 원칙](#데이터-원칙-사실-기반)을 그대로 따름.
 
+### Phase4 — 공시 영향 점수·Thesis 방향·이력 관리 (2026-07-01)
+- **KRX 시장조치 별도 API 없음 확인**: 공식 OpenAPI 는 시세·지수만 제공(기존 결정 재확인). 불성실공시법인지정 등도 DART `list.json` 제목 키워드 하나로만 잡힘 — "①DART 공시 ②KRX 시장조치 분리 API" 전제는 데이터소스상 불가. 라벨만 구분해 표기하는 수준이 현실적 한계.
+- `dart.disclosure_score(cat, report_nm)`: 공시 분류(hard/soft/positive)에 제목 키워드 기반 ★1~5 점수 + 한 줄 사유 부여. **내부 참고용, 매수·매도 신호 아님**. 희석률 등 세부 수치는 반영 안 함(ponytail: 근사치, 정밀화는 필요시 추가).
+- `_thesis_direction(code)`: 보유종목 한정, 4단계(강화/유지/약화/훼손). 횡령·배임·상장폐지·관리종목지정·회생절차는 훼손, 그 외 hard_negative(불성실공시 등)·soft_negative(유상증자/CB)는 약화, positive 만 있으면 강화, 없으면 유지. 조회 실패는 "확인 불가"(기존 `thesis_status`와 별개 필드로 병존 — 기존 소비처 안 깨기 위함).
+- `_action_needed(code, direction)`: 행동 변화 감지 문구. 훼손="투자 논리 재검토 필요", 약화="자금 사용 목적 확인"(희석 상세 있을 때) 또는 "후속 공시 확인 필요". 강화/유지/확인불가는 None(행동 변화 없음).
+- `results/briefing_state.json`: "어제 대비 무엇이 달라졌는지" 비교용 상태 파일. `{generated, disclosures: {종목코드: {last_rcept_no, last_type}}, thesis: {}, behavior: {}}`. 이번 구현은 `disclosures` 만 채움 — 같은 공시를 매일 반복 강조하지 않기 위해 각 공시 항목에 `new`(`rcept_no` > 저장된 `last_rcept_no`) 표시. `thesis`/`behavior` 는 스키마만 마련(향후 Thesis 변화·행동 변화 이력도 같은 파일에서 비교 확장 예정, 지금은 값 채우지 않음).
+
+### Phase5 — Thesis Impact Engine (2026-07-01)
+Phase4 의 ★점수/4단계 방향(thesis_status/thesis_direction/action_needed/disclosure.stars) 를
+전부 걷어내고 숫자 기반 Thesis 엔진으로 교체. 목적은 "오늘 무슨 공시가 있었나"가 아니라
+"오늘 투자 논리가 얼마나 강화/약화됐나"를 하루 5분 안에 보여주는 것.
+
+- **DART/KRX 완전 분리**: `disclosure_flags()` 반환 구조를 `{"dart": {event_type:[...]}, "krx": {event_type:[...]}}`
+  로 변경(기존 hard_negative/soft_negative/positive 3버킷 폐기). 두 카테고리는 절대 합치지 않음.
+- **이벤트 taxonomy(`dart.py` `_EVENT_RULES`)**: 제목 키워드 매칭마다 `event_type`(유상증자/CB/BW/자기주식취득·소각/
+  배당/최대주주변경/횡령/배임/회생절차/감자결정/감사의견 + KRX 불성실공시법인지정/관리종목지정/거래정지/
+  상장적격성실질심사/상장폐지), `level`(A/B/C), `confidence`(HIGH/MEDIUM/LOW), `severity`(1~5, 공시 자체 중요도),
+  `impact_score`(Thesis 영향도, 방향 불명이면 None), `reason` 한 줄을 함께 부여.
+  - **Level A** = 구조화 신뢰(DART 공식 report_nm 카테고리 또는 KRX 시장조치) — Thesis Impact Score 산정 대상.
+  - **Level B** = 제목 키워드 참고(공급계약/시설투자/합병/분할/신규사업) — 브리핑엔 표시하되 점수 미반영.
+  - **Level C** = 시장경보성(투자주의/투자유의/단기과열/투자경고) — 참고만, 점수 대상 아님(DART list.json 특성상
+    실제로는 거의 매치 안 될 가능성 높음 — 정직하게 빈 결과로 남김, 억지 매칭 안 함).
+  - ponytail: 감사의견거절/부적정/한정은 title 키워드로 매치 시도하나 DART report_nm 이 통상 "감사보고서제출"
+    까지만이라(의견 유형은 본문) 실제 매치는 드묾 — 정직한 한계로 문서화, 향후 본문 파싱 API 확보 시 승격.
+  - 배당/무상증자는 방향(확대·축소, 호재 여부) 판단 근거가 title 만으론 불충분 -> `impact_score=None`
+    (Thesis 합산에서 자동 제외, 이벤트 존재 자체는 표시). 실적 기반 이벤트(ROIC/FCF/부채감소트렌드/
+    대규모고객확보/실적 서프라이즈-컨센서스대비)는 이번 버전 **미구현**(기존 계산 필드로 커버 불가 — 과도한
+    근사 대신 range 밖으로 명시적 배제).
+- **Thesis Impact Score 계산**: Level A + `impact_score is not None` 인 이벤트만 합산.
+  `today`(이번 실행에서 새로 확인된 이벤트만) / `rolling_30d` / `rolling_365d`(둘 다 raw 이벤트 날짜 기준
+  매번 새로 합산 — 과거 점수를 누적 저장하지 않고 원본에서 재계산해 드리프트 방지).
+  보유종목만 계산(365일 조회), 비보유 후보는 기존처럼 30일만 조회(비용 절감, 랭킹용 가/감점은 별개 로직 유지).
+- **상태 5단계**: `+5↑ STRONGLY_STRENGTHENED · +2~+4 STRENGTHENED · -1~+1 MAINTAINED · -2~-4 WEAKENED · -5↓ BROKEN`
+  + 조회 실패 전용 `UNCONFIRMED`(6번째, "확인 불가"를 "유지"로 오판 방지 — 기존 thesis_status 의 "확인 불가"와
+  동일 원칙). 상태/영문 enum은 데이터 레이어 값이고, 이모지(🟢🔵🟡🔴) 변환은 브리핑 작성 단계(AI) 몫.
+- **action(행동 변화 감지)**: `{level: INFO/WARNING/CRITICAL, items: [...]}`. BROKEN→CRITICAL(재검토+자금목적+경영진설명),
+  WEAKENED→WARNING(후속공시, 희석 정보 있으면 자금목적 추가), 그 외 INFO+빈 items(변화 없음).
+- **buffett_lens**: 규칙 기반(오늘 ≤-5 또는 30일 누적 ≤-8 → 자본배분/신뢰도 점검 문구, 30일 누적 ≥+8 → 경쟁우위 유지 확인
+  문구, 그 외 None). LLM 생성 아님.
+- **confidence**(이벤트 신뢰도 아니고 Thesis 판단의 데이터 근거 충분도): KRX+DART Level A + 재무데이터 모두 있으면 0.95,
+  DART/KRX Level A 단독 0.75, 뉴스만 0.40, 아무 신호 없음 0.20 — spec 예시 구간을 그대로 규칙화.
+- **랭킹 점수(스크리너 후보 선정)와 완전 분리**: 기존 후보 제외/가점/감점 로직은 `dart.HARD_EXCLUDE_TYPES`/
+  `SOFT_PENALTY_TYPES`/`POSITIVE_BONUS_TYPES` 로 event_type 재매핑만 하고 그대로 유지 — Thesis Impact Score 는
+  투자자용 서술 지표, 스크리너 점수는 랭킹용 내부 지표로 서로 건드리지 않음.
+- **이력 dedup 버그 수정**: `briefing_state.json.disclosures[code]` 를 `recent`(최근 5건, 사람이 보는 요약 스냅샷)
+  만으로 dedup 판정하면 365일 조회 범위 안에 5건 넘게 쌓인 종목(예: 정정공시 반복)에서 6번째 이후로 밀려난
+  옛 이벤트가 **매번 "new" 로 되살아나는 버그**가 있었음(실측 확인: 한화솔루션 9건 중 4건이 매 실행마다 재계산).
+  `seen_ids`(상한 300, dedup 전용) 를 별도로 둬서 해결 — `recent` 는 표시용, `seen_ids` 는 판정용으로 역할 분리.
+- **실측 검증(2026-07-01)**: 한화솔루션 실제 유상증자 반복 정정공시(7건, 각 -2) + 불성실공시법인지정(2건, 각 -4)로
+  최초 실행 today=-22(스키마 첫 적용이라 전부 new) → 이후 정상 실행에서 today=0/rolling_30d=-8/rolling_365d=-22,
+  state=MAINTAINED(오늘 신규 없음이나 최근 추세는 약화 지속 — buffett_lens 규칙대로 문구 노출 확인).
+
+### Phase6 — Thesis State 자동화·Decay·Timeline 보강 (2026-07-01)
+Phase5 실측 후 "state 가 거의 항상 MAINTAINED(오늘 신규 이벤트 없으면 항상 유지로 뜸)" 피드백 반영.
+구조(score/state/reasons/action/buffett_lens/confidence)는 유지, 계산 로직만 보완.
+
+- **State cascade**: `today_score`(0 아니면 그대로) → 0이면 `rolling_30d` → 그것도 0이면
+  `rolling_365d`(decay 적용값) 순으로 대표 점수를 골라 5단계 상태 산정. 신규 이벤트가 없어도
+  최근 추세가 남아 있으면 그 추세로 상태가 매겨짐(기존엔 today_score 만 봐서 거의 늘 MAINTAINED).
+  `reasons`/`contributors`/`buffett_lens` 도 이때 선택된 창(today/30d/365d)의 이벤트 기준으로 계산 —
+  숫자와 서술이 항상 같은 근거를 가리키도록 함.
+- **Score Decay**: `rolling_365d` 는 이벤트 경과일수 가중합(`_decay_weight`: 30일=100%/90일=70%/
+  180일=40%/365일=20%)으로 변경 — 오래된 이벤트일수록 기여도 감소. `today_score`/`rolling_30d` 는
+  창 자체가 30일 이내(weight 100%)라 수치 변화 없음(기존 raw 합과 동일).
+- **contributors**: reason별 기여 점수 합계(사용된 창 기준, 365d 창이면 decay 반영값). "Impact 구성" 표시용.
+- **action 5단계**: BROKEN→CRITICAL(4항목, IR자료확인 추가), WEAKENED→WARNING(기존과 동일),
+  STRENGTHENED/STRONGLY_STRENGTHENED→**WATCH**(다음 실적 확인/신규 계약 진행 확인, 신규 레벨),
+  MAINTAINED→INFO(빈 items).
+- **buffett_lens 긍정 분기 세분화**: rolling_30d≥8 이고 reasons 에 "자사주"/"배당" 포함 시 주주환원 특화 문구,
+  아니면 일반 문구. 부정 분기는 today≤-5 OR rolling_30d≤-8(기존 유지) — 규칙 기반, LLM 생성 아님.
+- **confidence 5단계 갱신**: KRX+DART+실적=0.95, (DART 또는 KRX)+실적=0.75, **실적만=0.50**(신규 구간),
+  뉴스만=0.40, 데이터부족=0.20. `low_confidence`(<0.5) 필드 추가 — "데이터 근거 제한" 표시를 LLM 판단이
+  아닌 데이터 생성 단계 값으로 고정.
+- **last_changed / last_changed_days_ago**: Level A 채점 이벤트 중 가장 최근 `rcept_dt`. 브리핑에서
+  "Thesis 변경 N일 전"에 바로 사용(날짜 계산을 LLM에 맡기지 않음).
+- **timeline**: 채점 이벤트를 (날짜, reason) 중복 제거 후 최신순 최대 10건. 최근 변화 흐름 표시용.
+- **summary**: `state`+상위 3개 `reasons`+`buffett_lens` 조합 템플릿 문자열을 데이터 생성 단계에서 저장
+  (LLM 매번 재추론 안 함). 표시용 `state_label`(이모지 매핑)도 같은 이유로 함께 저장.
+- **실측 검증**: 삼성전자 자사주취득 3건(경과 67~85일, decay 반영) → `rolling_365d=3.0(decay 전 6)`,
+  cascade가 rolling_365d 선택 → `state=STRENGTHENED`(기존엔 today=0이라 MAINTAINED 로 묻혔음).
+  현대차는 decay 후 1.4(<2 임계치)라 `MAINTAINED` 유지 — 문턱값 근처에서 decay 가 상태를 가르는 것 확인.
+  한화솔루션은 rolling_30d=-8(0 아님)이 cascade 로 선택돼 `state=BROKEN`, `action=CRITICAL`,
+  `buffett_lens`/`summary` 정상 생성.
+
+### Phase7 — V3(데이터 모델 마지막 개선): 버전관리·변화감지·희석률·재무이벤트·PortfolioHealth (2026-07-01)
+사용자가 "이번을 V3 데이터 모델 기준 버전으로 삼고, 이후엔 구조 변경보다 브리핑 품질에 집중"이라고
+못박음. 기존 필드는 유지, 계산 로직·신규 파생 필드만 추가.
+
+- **버전 관리**: 출력 최상위에 `schema_version`("2.0", JSON 구조 버전 — 필드 구조 변경 시만 증가),
+  `thesis_engine_version`("3.0", 점수 산정 규칙 버전 — 계산식 변경 시만 증가) 추가.
+- **today_score**: 이미 Phase5 부터 "이번 실행에서 새로 확인된 이벤트만" 합산하도록 구현돼 있었음
+  (신규 요청 아니라 기존 동작 재확인). 대부분 0으로 보이는 건 버그가 아니라 "오늘 새 공시가 없었다"는
+  정상 신호 — Phase6 의 state cascade(today→30d→365d) 가 이 상황에서 추세를 대신 보여줌.
+- **Thesis Change 감지**: `thesis.change = {prev_state, changed, direction(IMPROVED/WORSENED),
+  alert(✅/🚨 문구)}`. `briefing_state.json.thesis` 에 저장된 전일 state 와 랭크 비교
+  (BROKEN<WEAKENED<MAINTAINED<STRENGTHENED<STRONGLY_STRENGTHENED). UNCONFIRMED 가 얽히면 방향
+  판단 보류(모르는 걸 개선/악화로 단정 안 함).
+- **희석률 티어링**: `dart.dilution_extra_penalty(pct)`(10~20%:-1, 20~30%:-2, 30%↑:-3)를 유상증자
+  기본 감점(-2)과 **별개 이벤트**(`event_type=dilution_penalty`, reason=`"희석률 N%"`)로 `flags["dart"]`
+  에 추가 — "유상증자"와 "희석률"이 contributors 에 분리된 줄로 보이도록.
+  - **버그 발견·수정**: 기존 코드가 `if hard_present: ... elif SOFT_PENALTY_TYPES: ...` 로 갈라져 있어,
+    보유종목이 hard_negative(불성실공시 등)와 soft_negative(유상증자)를 **동시에** 안고 있으면 희석률
+    상세 조회 자체가 스킵됐음(한화솔루션 실측: 불성실공시+유상증자 동시 보유라 dilution_penalty 가
+    전혀 안 붙는 것으로 발견). `elif` → 독립 `if` 로 수정해 hard_negative 여부와 무관하게 항상 확인.
+- **재무 기반 긍정 이벤트(ROE 개선/부채 감소)**: `dart.financials()` 가 이미 매 호출마다 받아오던
+  frmtrm(전기) 금액을 캡처해(추가 API 호출 없음) `roe_prev_pct`/`debt_ratio_prev_pct` 추가.
+  `dart.fin_events(fin)` 가 전기 대비 ROE +1%p↑ → "ROE 개선"(+1), 부채비율 -10%p↓ → "부채 감소"(+2)
+  를 이벤트로 만들어 `flags["dart"]` 에 편입. 날짜는 사업연도말(`YYYY1231`)이라 공시 이벤트와 동일한
+  decay/timeline 로직을 그대로 탐(별도 코드 경로 불필요). `rcept_no` 가 없어 dedup "new" 판정 대상은
+  아니고(항상 False), 30일/365일 rolling 집계에만 반영 — 연차 보고 하나가 매일 "새 이벤트"로
+  재카운트되는 것을 방지.
+  - **미구현(명시적 보류)**: 배당확대(방향 판단에 원문 파싱 필요, title 만으론 불가) · 실적
+    서프라이즈(컨센서스 추정치 소스 없음) · ROIC 개선 · FCF 증가 · 현금흐름 개선(현금흐름표 계정
+    매핑 미비 — PER/PBR 근사 실패 전례처럼 어설픈 계정 매칭이 오차 키움) · 신규 대형계약(이미
+    Level B "공급계약"으로 존재, 구조화 API 없어 Level A 승격 불가). 근거 있는 것만 우선 반영하고
+    나머지는 계정 매핑·API 확보 시 재검토.
+- **Buffett Lens 세분화**: 긍정 분기에서 `reasons` 에 "자사주"(주주환원) / "부채 감소"·"ROE 개선"
+  (자본배분) 존재 여부로 문구 3갈래 분기. 경제적 해자/현금창출력/안전마진 등은 FCF·내재가치 데이터가
+  없어 규칙화 보류(문구만 그럴듯하게 지어내지 않음 — LLM 자유생성 금지 원칙 유지).
+- **Confidence**: Phase6 에서 이미 0.95/0.75/0.50/0.40/0.20 5단계로 구현돼 있었음(문서화만 재확인,
+  코드 변경 없음).
+- **Portfolio Health**: `kospi200_screen.json` 자체 데이터(보유종목 thesis 분포 + 업종 집중도)만으로
+  계산 — `100 - 훼손×25 - 약화×10 + 강화×5`(0~100 클램프), `top_sector_concentration_pct`.
+  **ETF 비중/현금 비중은 이번에도 미포함** — 포지션 평가금액은 `briefing_data.json`(briefing.py) 쪽
+  데이터라 이 스크립트 하나로는 계산 불가(두 산출물을 합치는 별도 스크립트 필요, 향후 검토).
+- **Trend**: `thesis.trend = {"30d":, "365d":}` — rolling 점수를 ↗강화/→유지/↘약화 화살표로 변환
+  (state 판정과 동일한 ±2 임계치 재사용, 별도 기준 추가 안 함).
+- **Investment Case**: `thesis.investment_case: []` — 스키마만 준비(요청대로 값은 비움). 향후 종목별
+  투자 근거(AI 메모리/HBM 성장 등)마다 강화/유지/약화 평가를 추가할 자리.
+- **실측 검증**: 한화솔루션 rolling_30d -8→**-11**(희석률 -3 반영), contributors 3줄(유상증자 -4,
+  불성실공시 -4, 희석률30% -3)로 분리 노출 확인. 삼성전자 rolling_365d 3.0→**3.2**(ROE개선 +0.2 decay
+  반영 합류), reasons/timeline 에 "ROE 개선" 추가 확인. `portfolio_health.score=80`(보유 5종목 중 강화1·
+  훼손1) 확인.
+- **today_score/change "버그" 재확인**: 사용자가 "대부분 0/false 이라 버그 아니냐"고 재차 문의.
+  `briefing_state.json` 을 인위 조작(이력 리셋 + 전일 state=MAINTAINED 로 세팅)해 재실행한 결과
+  `today=-22`, `change={changed:true, direction:WORSENED, alert:"🚨 투자 Thesis 변경"}` 정확히 산출 →
+  버그 아니라 "최근 진짜 신규 이벤트가 없었다"는 정상 신호였음을 실측으로 확인(원상복구 후 정상 재확인).
+
+### Phase8 — Knowledge Growth Engine 뼈대(Registry+Pipeline) + 핵심 3 Processor (2026-07-01)
+"이후엔 데이터 구조보다 Knowledge/브리핑 품질에 집중"이라던 V3 선언 이후, 사용자가 별도로 장기
+기업 지식 축적 시스템을 요청. 브리핑(`results/`, 매번 덮어씀)과 분리된 `knowledge/`(장기 누적, 삭제 없음)
+신설. 9개 Processor 전체가 아니라 **뼈대(Registry+Pipeline) + 핵심 3개**만 이번에 구현(사용자가 직접
+범위를 좁혀 확정).
+
+- **차단 이슈 먼저 확인**: WikiEnricher 가 요구한 founder/ceo/website/products/competitors 등은
+  DART/KRX/Naver/Google뉴스 어디에도 없는 데이터라, 없이 진행하면 LLM 지어내기나 새 외부 API가
+  필요 — 이 프로젝트의 "실측값만, 추측 금지" 원칙과 정면충돌. 사용자에게 확인 후 **DART
+  company.json 이 실제 주는 것만 자동 채움, 나머지는 null 유지 + 사용자가 `manual.json` 에 직접
+  채우는 4계층 구조**로 확정(WikiEnricher 자체는 "CompanyProfileProcessor" 로 개명 제안됐고
+  Phase2-3 로 연기 — 이번엔 미구현).
+- **디렉터리**: `knowledge/company/{종목코드}/{manual,dart,generated,merged}.json`.
+  `manual.json`(사용자 작성, 최우선) 만 git 추적 — 나머지 3개는 자동 생성 산출물이라 `.gitignore` 등록
+  (`results/*.json` 과 동일한 취급 원칙).
+- **Registry(`processors/registry.py`)**: `@register("이름")` 데코레이터 하나로 등록. 새 Processor
+  추가 시 pipeline.py 리스트에 이름만 넣으면 됨(개별 배선 코드 수정 불필요 — 사용자가 명시적으로
+  요청한 "향후 확장 쉬운 구조").
+- **Pipeline(`processors/pipeline.py`)**: 순서 고정 `timeline -> knowledge_merge -> investment_case`
+  (요청받은 다이어그램 그대로). `run(code, events)` 하나로 3단계 실행.
+- **TimelineProcessor**: `generated.json` 의 `timeline` 에 신규 이벤트만 append(삭제 없음).
+  dedup 키: `rcept_no` 있으면 그 값, 없으면(재무 이벤트 등 합성) `(event_type, date, reason)`.
+  Thesis Engine(Phase5~7)이 이미 만들어 둔 이벤트 dict(report_nm/rcept_dt/rcept_no/event_type/
+  impact_score/reason)를 그대로 재사용 — 새 데이터 소스 불필요.
+- **KnowledgeMergeProcessor**: `manual.json(최우선) > dart.json(공식, 아직 비어있음) >
+  generated.json(계산결과)` 순으로 병합해 `merged.json` 저장. `timeline` 은 여기서 한 번 더
+  dedup(같은 이벤트가 여러 경로로 들어와도 하나만).
+- **InvestmentCaseProcessor**: Case 정의(name/keywords/importance)는 **오직 `manual.json` 에서만**
+  옴(자동으로 테마를 지어내지 않음). `merged.json` 의 timeline 에서 keyword 매칭된 이벤트만 근거로
+  `status`(Thesis 5단계 재사용)/`trend`(UP/DOWN/FLAT, 최근 30일 매칭+부호)/`reason`(매칭 이벤트
+  reason 상위 3개 그대로)/`case_status`(마지막 매칭 365일 초과 시 INACTIVE — 삭제 대신 상태변경,
+  point14 원칙)를 규칙 기반 계산. LLM 은 이 값을 만들 때 관여 안 함(브리핑 작성 시 해석만 담당).
+- **screener.py 연동**: 보유종목 Thesis 계산에 쓰던 `all_events` 를 그대로
+  `knowledge_pipeline.run(code, all_events)` 에 넘겨 매 실행마다 자동 증분(별도 명령 불필요).
+  실패해도 `try/except` 로 격리해 Knowledge 문제가 브리핑 생성을 막지 않게 함(기존 클라이언트
+  호출부와 동일한 방어 스타일).
+- **실측 검증**: 한화솔루션에 테스트용 `manual.json`(case="테스트-유상증자 리스크",
+  keywords=["유상증자","불성실공시"]) 을 임시로 넣고 2회 연속 실행 → `merged.json` 에 timeline 11건
+  누적, investment_case 1건(`status=BROKEN, trend=DOWN, case_status=ACTIVE`) 정상 계산, 2회차 실행
+  에도 timeline 11건 유지(중복 없음) 확인 후 테스트 파일 정리. 삼성전자 등 실제 보유종목은
+  `manual.json` 없이도 timeline 만 정상 누적됨(investment_cases 는 빈 리스트 — 케이스 정의 없으면
+  억지로 안 만든다는 원칙대로).
+
+### Phase2-2 — SummaryProcessor(Timeline Digest) + Tag 구조 (2026-07-01)
+사용자가 "Summary/ContextProcessor" 를 요청했으나 예시가 자연어 서술문(원인→결과 인과관계
+포함)이라 **기존 원칙(LLM이 Knowledge를 생성하지 않는다)과 충돌** — 확인 후 범위 조정.
+
+- **SummaryProcessor 는 자연어 요약이 아니라 "Timeline Digest"**: timeline 을 기간별(월/분기/연)
+  로 묶어 `{"period": "2026-06", "events": ["유상증자", "불성실공시법인 지정"]}` 형태로 압축.
+  문장 생성 없음 — 이 Digest 를 브리핑 작성 단계에서 LLM 이 읽어 문장을 만든다(Knowledge=사실,
+  LLM=해석 분리 유지).
+- **규칙은 코드가 아니라 `config/digest_rules.json`**: `period_unit`(month/quarter/year),
+  `max_events_per_period`, `include_event_types`/`exclude_event_types`, `sort`. 규칙 변경 시
+  코드 수정 불필요.
+- **Incremental**: 기간별 이벤트 id 집합(`_source_ids`, rcept_no 있으면 그 값 없으면
+  event_type+date+reason)을 저장해두고, 다음 실행에서 그 기간의 id 집합이 그대로면 재계산 없이
+  이전 결과를 재사용. `_source_ids` 는 내부 변경감지용이라 `merged.json` 산출 시 제거
+  (`knowledge_merge_processor` 가 `_` 접두 키를 걸러냄).
+- **ContextProcessor 는 이번 단계 보류**: Context(인과관계·산업 배경)는 기업의 고정 지식이
+  아니라 **시장 상황에 따라 계속 바뀌는 동적 정보** — `manual.json` 에 넣으면 금방 낡은 정보가
+  됨. 대신 향후 뉴스·매크로 데이터가 준비되면 "Context Builder"(Knowledge + News + Macro + Tags
+  -> 브리핑 생성 시점에 조합)로 별도 설계하기로 하고, 이번엔 그 입력값이 될 **Tag 구조만** 준비.
+- **Tag 구조(`processors/tags.py`)**: AI/HBM/Memory/Cloud/EV/Battery/Renewable/Semiconductor
+  키워드 테이블로 investment_case 이름·키워드에서 규칙 기반 매칭(`match_tags()`). 매칭 없으면
+  빈 리스트(테마 억지로 안 만듦). `investment_case_processor` 가 case 별 `tags` +
+  회사 단위 `merged.json.tags`(전체 case 태그 합집합)를 계산.
+- **pipeline 순서 갱신**: `timeline -> summary -> knowledge_merge -> investment_case`.
+- **실측 검증**: 한화솔루션 테스트 케이스로 digest 4개 기간(2026-06/05/04, 2025-12) 정상 생성,
+  `tags=["Renewable"]`("태양광 사업" 케이스명 매칭) 확인. 2회 연속 실행으로 digest 안정성(동일
+  기간 재계산 없이 유지) 확인 후 테스트 파일 정리.
+- **파이프라인 순서 재검토(같은 날 추가 커밋)**: 사용자가 "summary 를 knowledge_merge·
+  investment_case 뒤로 옮기는 게 맞지 않냐"고 재확인 요청. 검토 결과 — 지금은 manual.json 이
+  timeline 에 아무것도 기여하지 않아 순서를 바꿔도 값은 동일하지만, **향후 manual.json 이
+  timeline 을 보완하게 되면 순서가 실제로 결과에 영향**을 준다(Digest 가 "최종 merged 상태"를
+  반영 못 하고 뒤처지는 문제 생김). 순서를 `timeline -> knowledge_merge -> investment_case ->
+  summary` 로 변경, `summary_processor` 는 `generated.json` 대신 **`merged.json` 의 timeline**
+  을 읽도록 수정(증분 판단용 `_source_ids` 상태는 계속 `generated.json` 에 보관, 최종 Digest 는
+  `merged.json` 에도 반영 — investment_case_processor 와 동일 패턴). 재실행으로 결과값 동일함
+  확인(현재 데이터 기준으로는 순서 무관하게 같은 출력 — 예상대로).
+
+### Phase3 — Search Layer(키워드 검색, 임베딩·벡터DB 도입 보류) (2026-07-01)
+사용자가 "Memory Layer"(Embedding + Vector DB + Semantic/Hybrid Search)를 요청했으나, 검토
+결과 **지금 규모에서 명백한 과설계(YAGNI)** — 보유종목 5개, Chunk 수십 개 코퍼스에 ChromaDB·
+FAISS 추상화·BM25 하이브리드를 넣는 건 JSON 파일 몇 개 grep 하는 것과 성능 차이가 없음.
+추가로 **임베딩을 만들 수단 자체가 없음**(`.env` 에 OpenAI/Cohere 같은 임베딩 API 키 없음,
+로컬 sentence-transformers 는 torch 급 무거운 의존성이라 지금 가벼운 `.venv`(pandas/requests
+수준)와 안 맞음). 사용자에게 확인 후 **Search Layer(키워드 검색)만 먼저 구축, 임베딩/벡터DB
+는 인터페이스만 비워두고 도입 자체는 안 함**으로 범위 축소.
+
+- **`krxfree/search/`**: `SearchBackend`(추상, `search(query, filters, top_k)`) ->
+  `KeywordSearchBackend`(현재 유일 구현, 부분일치 스코어링) -> `SearchEngine`(공통 API,
+  `default_engine()` 이 백엔드 생성). 코퍼스가 커져도 `SearchEngine` 호출부는 안 바뀌고
+  `default_engine()` 내부 백엔드만 교체하면 됨.
+- **`index.py`**: `knowledge/company/*/merged.json` 에서 검색 가치 있는 텍스트만 Chunk 화
+  (Timeline Digest 한 기간 = 1 chunk, Investment Case 한 건 = 1 chunk). Raw JSON 전체를
+  인덱싱하지 않음. 지금 규모에서는 검색할 때마다 다시 빌드해도 비용 무시 가능해 별도 캐싱 없음.
+- **Metadata 필터**: `company_code`/`chunk_type`/`thesis_state`/`tag`/`date_from`/`date_to`.
+- **Semantic Search 재검토 조건(사용자 확정)**: 아래 중 하나라도 만족하면 임베딩 도입 재검토.
+  - 종목 수 100개 이상
+  - Chunk 수 10,000개 이상
+  - 자연어 질의응답 기능 필요
+  - Keyword Search 로 실제 한계 확인(재현 가능한 실패 사례)
+  - 임베딩 API/모델을 이미 도입한 상태
+  그 전까지는 Search Layer(키워드)만 유지 — Embedding Engine/MemoryStore 추상화(Chroma/FAISS/
+  LanceDB)/Hybrid Search/Memory Registry 는 전부 미구현(로드맵으로만 유지).
+- **실측 검증**: `krxfree.search.engine` 로 "유상증자" 검색 → 한화솔루션 digest chunk 3건
+  정상 반환(관련도순), `company_code=009830 & chunk_type=digest` 필터로 4건(전체) 반환 확인.
+
+### Phase4 — Portfolio Intelligence Engine + Snapshot, Hermes Contract(설계만) (2026-07-01)
+새 데이터 수집 없이 기존 산출물(Thesis Engine·Collection Layer·Search Layer)만 조합.
+
+- **`krxfree/portfolio_engine.py`**: `results/kospi200_screen.json`(thesis/sector/PER/PBR/DIV) +
+  `results/briefing_data.json`(포지션 시세) + Search Layer(태그, **merged.json 직접 안 읽고
+  `krxfree.search.engine` 경유** — 사용자가 명시적으로 요구한 "Portfolio ↓ Search ↓ Knowledge"
+  원칙).
+  - `sector_allocation`: 포지션 평가금액(`current*shares`, 없으면 `avg*shares` 근사) 가중
+    업종/국가/ETF 비중. 평가금액 자체를 못 구하면(시세 없음 등) `None`(추측 금지).
+  - `theme_exposure`: 산업 태그(Knowledge, Search 경유) + 스타일 태그(배당=DIV≥2%,
+    Value=PER<10 또는 PBR<1, 성장=영업이익·매출성장률≥15% — 전부 실측 필드 규칙, 새 데이터 아님).
+  - `risk`/`diversification`: `risk_score`=훼손·약화 종목 비중 기반 내부 참고치, `diversification`
+    =업종 HHI(허핀달-허쉬만지수) 기반 근사.
+  - **의도적으로 미계산**: 현금 비중(portfolio.json 에 현금 필드 자체 없음), 종목간 Correlation
+    (보유종목 전체 가격 시계열 재계산이 필요한 별도 규모 작업 — 필요성 확인되면 추가).
+- **Portfolio Snapshot**: `results/portfolio_snapshot/YYYY-MM-DD.json`, 하루 1회, 기존 파일
+  삭제 없음(누적 History). 직전 날짜 스냅샷 대비 `change_vs_prev`(health/risk/diversification
+  delta) 자동 계산. `.gitignore` 에 추가(개인 포트폴리오 데이터, 기존 `results/*.json` 과 동일 취급).
+- **Hermes Contract**: 사용자가 "이번엔 구현하지 말고 API 계약만 문서화"라고 명시 — 실제
+  코드 없이 `docs/HERMES_CONTRACT.md` 에 함수 시그니처·반환값·소스만 표로 정리(READ 전용 원칙).
+- **실측 검증**: 실제 실행 → `sector_allocation.by_sector_pct`(제조33.1/기타29.2/정보통신37.8),
+  `etf_pct=29.2`, `theme_exposure`(성장 3종목/배당 1종목/Value 1종목), `risk_score=40.0`,
+  `diversification_score=66.2` 정상 산출. 가짜 전일 스냅샷(health 77→80, risk 30→40)을 임시로
+  넣어 `change_vs_prev` delta(+3/+10/0) 정확히 계산되는지 확인 후 테스트 파일 정리.
+
+### Phase4.1 — Portfolio Snapshot 스키마 보완 + Risk Score contributors 화 (2026-07-01)
+- **Snapshot 최상위 필드 확장**: `engine_version`(Portfolio Engine 계산 로직 버전, `schema_version`
+  과 별개), `generated_at`(전체 타임스탬프, `snapshot_date`는 날짜만), `risk_score`/
+  `diversification_score`(상세 dict 안에도 있던 값을 최상위에 요약으로 승격), `top_risks`
+  (flags 중 BROKEN 우선 상위 5개), `top_positive_changes`(STRENGTHENED/STRONGLY_STRENGTHENED
+  종목), `action_items`(기존 `actions` 필드명을 사용자 요청대로 변경 — 중복 저장 아님, rename).
+- **risk_score 스케일 전환(중요, 하위 호환 깨짐)**: 기존 "0=안전/100=위험" 에서
+  **"100=안전/0=위험"으로 반전**(portfolio_health 와 동일한 "100에서 감점" 방식으로 통일).
+  이유: 사용자가 요청한 contributors 예시(`{"reason":"불성실공시","impact":-18}` 식 음수 감점)가
+  100에서 깎는 모델이라야 자연스럽게 맞음. `risk.contributors`: Thesis 훼손(가중 40) > KRX
+  시장조치(30) > Thesis 약화(20) > 희석 진행(15) > 업종 집중 50%초과분(15) — 전부 코드에 고정된
+  배점 상수(임의 조정 아님, 재현 가능). **LLM 은 점수가 아니라 contributors 를 설명**하는 게 원칙.
+- **실측 검증**: 훼손 1종목(-8)+KRX시장조치 1종목(-6)+희석 1종목(-3)+업종집중 80%(-9) →
+  `risk_score = 100-8-6-3-9 = 74` 정확히 산출, contributors 4줄 모두 노출 확인.
+
+### Phase5 — Briefing Generator: Rule Engine + Briefing Schema (2026-07-01)
+"LLM이 자유롭게 브리핑을 쓰는 구조가 아니라, 규칙 기반 JSON을 먼저 만들고 LLM은 그 JSON만 읽어
+문장을 쓴다"는 사용자 요청 반영. **LLM 은 계산하지 않는다 — Rule Engine 이 계산하고, LLM 은
+해석·서술만.** 이 원칙은 애초에 이 프로젝트 전체가 지켜온 것(모든 JSON 은 실측/규칙 기반, AI 는
+문장만 작성)과 동일선상 — 이번엔 그 산출물을 3개 파일(kospi200_screen/briefing_data/
+portfolio_snapshot) 대신 **단일 Briefing Schema** 로 통합한 것.
+
+- **`krxfree/briefing_generator.py`**: 새 계산 없음 — `results/kospi200_screen.json` +
+  `results/briefing_data.json` + `results/portfolio_snapshot/`(최신) 만 조합해
+  `results/briefing_schema.json` 생성.
+- **Rule Engine(고정 우선순위, LLM 판단에 안 맡김)**:
+  1. Thesis `BROKEN` 종목은 `top_changes` 상위 3개 안에 반드시 포함(다른 신호와 무관하게 보장).
+  2. `portfolio.health` 를 portfolio 섹션의 첫 필드로(스키마 키 순서 자체가 우선순위 신호).
+  3. 전일 대비 `risk_score` 5점 이상 하락(위험 증가) → `headline` 으로 승격(가장 먼저 노출).
+     그 다음 우선순위는 `portfolio_health` 변화.
+  4. 오늘 신규 이벤트(`thesis.score.today != 0`) 종목은 `top_changes` 후보(BROKEN 다음 순위).
+  5. `WARNING`/`CRITICAL` action 있는 종목은 필터링 없이 전부 `actions` 에 포함.
+- **Schema 구조**: `{schema_version, generated_at, headline, market, portfolio, risk, top_changes,
+  actions, companies, watchlist}` — 사용자 예시 그대로.
+- **실측 검증**: 정상 실행 → `headline=null`(전일 대비 유의미한 변화 없음), `top_changes` 에
+  한화솔루션(BROKEN) 포함 확인. 전일 risk_score 를 인위로 14점 하락시켜 재실행 →
+  `headline={"type":"risk_worsened", ...}` 정상 승격 확인 후 테스트 데이터 원복.
+
 ---
 
 ## 한계 / 확장 여지
