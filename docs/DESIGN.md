@@ -139,6 +139,51 @@
 - `_action_needed(code, direction)`: 행동 변화 감지 문구. 훼손="투자 논리 재검토 필요", 약화="자금 사용 목적 확인"(희석 상세 있을 때) 또는 "후속 공시 확인 필요". 강화/유지/확인불가는 None(행동 변화 없음).
 - `results/briefing_state.json`: "어제 대비 무엇이 달라졌는지" 비교용 상태 파일. `{generated, disclosures: {종목코드: {last_rcept_no, last_type}}, thesis: {}, behavior: {}}`. 이번 구현은 `disclosures` 만 채움 — 같은 공시를 매일 반복 강조하지 않기 위해 각 공시 항목에 `new`(`rcept_no` > 저장된 `last_rcept_no`) 표시. `thesis`/`behavior` 는 스키마만 마련(향후 Thesis 변화·행동 변화 이력도 같은 파일에서 비교 확장 예정, 지금은 값 채우지 않음).
 
+### Phase5 — Thesis Impact Engine (2026-07-01)
+Phase4 의 ★점수/4단계 방향(thesis_status/thesis_direction/action_needed/disclosure.stars) 를
+전부 걷어내고 숫자 기반 Thesis 엔진으로 교체. 목적은 "오늘 무슨 공시가 있었나"가 아니라
+"오늘 투자 논리가 얼마나 강화/약화됐나"를 하루 5분 안에 보여주는 것.
+
+- **DART/KRX 완전 분리**: `disclosure_flags()` 반환 구조를 `{"dart": {event_type:[...]}, "krx": {event_type:[...]}}`
+  로 변경(기존 hard_negative/soft_negative/positive 3버킷 폐기). 두 카테고리는 절대 합치지 않음.
+- **이벤트 taxonomy(`dart.py` `_EVENT_RULES`)**: 제목 키워드 매칭마다 `event_type`(유상증자/CB/BW/자기주식취득·소각/
+  배당/최대주주변경/횡령/배임/회생절차/감자결정/감사의견 + KRX 불성실공시법인지정/관리종목지정/거래정지/
+  상장적격성실질심사/상장폐지), `level`(A/B/C), `confidence`(HIGH/MEDIUM/LOW), `severity`(1~5, 공시 자체 중요도),
+  `impact_score`(Thesis 영향도, 방향 불명이면 None), `reason` 한 줄을 함께 부여.
+  - **Level A** = 구조화 신뢰(DART 공식 report_nm 카테고리 또는 KRX 시장조치) — Thesis Impact Score 산정 대상.
+  - **Level B** = 제목 키워드 참고(공급계약/시설투자/합병/분할/신규사업) — 브리핑엔 표시하되 점수 미반영.
+  - **Level C** = 시장경보성(투자주의/투자유의/단기과열/투자경고) — 참고만, 점수 대상 아님(DART list.json 특성상
+    실제로는 거의 매치 안 될 가능성 높음 — 정직하게 빈 결과로 남김, 억지 매칭 안 함).
+  - ponytail: 감사의견거절/부적정/한정은 title 키워드로 매치 시도하나 DART report_nm 이 통상 "감사보고서제출"
+    까지만이라(의견 유형은 본문) 실제 매치는 드묾 — 정직한 한계로 문서화, 향후 본문 파싱 API 확보 시 승격.
+  - 배당/무상증자는 방향(확대·축소, 호재 여부) 판단 근거가 title 만으론 불충분 -> `impact_score=None`
+    (Thesis 합산에서 자동 제외, 이벤트 존재 자체는 표시). 실적 기반 이벤트(ROIC/FCF/부채감소트렌드/
+    대규모고객확보/실적 서프라이즈-컨센서스대비)는 이번 버전 **미구현**(기존 계산 필드로 커버 불가 — 과도한
+    근사 대신 range 밖으로 명시적 배제).
+- **Thesis Impact Score 계산**: Level A + `impact_score is not None` 인 이벤트만 합산.
+  `today`(이번 실행에서 새로 확인된 이벤트만) / `rolling_30d` / `rolling_365d`(둘 다 raw 이벤트 날짜 기준
+  매번 새로 합산 — 과거 점수를 누적 저장하지 않고 원본에서 재계산해 드리프트 방지).
+  보유종목만 계산(365일 조회), 비보유 후보는 기존처럼 30일만 조회(비용 절감, 랭킹용 가/감점은 별개 로직 유지).
+- **상태 5단계**: `+5↑ STRONGLY_STRENGTHENED · +2~+4 STRENGTHENED · -1~+1 MAINTAINED · -2~-4 WEAKENED · -5↓ BROKEN`
+  + 조회 실패 전용 `UNCONFIRMED`(6번째, "확인 불가"를 "유지"로 오판 방지 — 기존 thesis_status 의 "확인 불가"와
+  동일 원칙). 상태/영문 enum은 데이터 레이어 값이고, 이모지(🟢🔵🟡🔴) 변환은 브리핑 작성 단계(AI) 몫.
+- **action(행동 변화 감지)**: `{level: INFO/WARNING/CRITICAL, items: [...]}`. BROKEN→CRITICAL(재검토+자금목적+경영진설명),
+  WEAKENED→WARNING(후속공시, 희석 정보 있으면 자금목적 추가), 그 외 INFO+빈 items(변화 없음).
+- **buffett_lens**: 규칙 기반(오늘 ≤-5 또는 30일 누적 ≤-8 → 자본배분/신뢰도 점검 문구, 30일 누적 ≥+8 → 경쟁우위 유지 확인
+  문구, 그 외 None). LLM 생성 아님.
+- **confidence**(이벤트 신뢰도 아니고 Thesis 판단의 데이터 근거 충분도): KRX+DART Level A + 재무데이터 모두 있으면 0.95,
+  DART/KRX Level A 단독 0.75, 뉴스만 0.40, 아무 신호 없음 0.20 — spec 예시 구간을 그대로 규칙화.
+- **랭킹 점수(스크리너 후보 선정)와 완전 분리**: 기존 후보 제외/가점/감점 로직은 `dart.HARD_EXCLUDE_TYPES`/
+  `SOFT_PENALTY_TYPES`/`POSITIVE_BONUS_TYPES` 로 event_type 재매핑만 하고 그대로 유지 — Thesis Impact Score 는
+  투자자용 서술 지표, 스크리너 점수는 랭킹용 내부 지표로 서로 건드리지 않음.
+- **이력 dedup 버그 수정**: `briefing_state.json.disclosures[code]` 를 `recent`(최근 5건, 사람이 보는 요약 스냅샷)
+  만으로 dedup 판정하면 365일 조회 범위 안에 5건 넘게 쌓인 종목(예: 정정공시 반복)에서 6번째 이후로 밀려난
+  옛 이벤트가 **매번 "new" 로 되살아나는 버그**가 있었음(실측 확인: 한화솔루션 9건 중 4건이 매 실행마다 재계산).
+  `seen_ids`(상한 300, dedup 전용) 를 별도로 둬서 해결 — `recent` 는 표시용, `seen_ids` 는 판정용으로 역할 분리.
+- **실측 검증(2026-07-01)**: 한화솔루션 실제 유상증자 반복 정정공시(7건, 각 -2) + 불성실공시법인지정(2건, 각 -4)로
+  최초 실행 today=-22(스키마 첫 적용이라 전부 new) → 이후 정상 실행에서 today=0/rolling_30d=-8/rolling_365d=-22,
+  state=MAINTAINED(오늘 신규 없음이나 최근 추세는 약화 지속 — buffett_lens 규칙대로 문구 노출 확인).
+
 ---
 
 ## 한계 / 확장 여지

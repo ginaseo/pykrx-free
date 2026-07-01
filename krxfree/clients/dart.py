@@ -261,12 +261,62 @@ def per_pbr(fin: dict, close: float, shares: float):
     return per, pbr
 
 
-# ---------- 공시 필터 (Phase1: 호재/악재 키워드 분류) ----------
-# report_nm 부분일치. 강한 악재는 후보 제외급, 중간 악재는 감점, 호재는 소폭 가점.
-HARD_NEGATIVE_KW = ("감자결정", "관리종목지정", "상장폐지", "횡령", "배임", "회생절차", "불성실공시법인지정")
-SOFT_NEGATIVE_KW = ("유상증자결정", "전환사채권발행결정", "신주인수권부사채권발행결정", "교환사채권발행결정")
-POSITIVE_KW = ("자기주식취득결정", "자기주식취득신탁계약체결결정", "단일판매공급계약체결")
+# ---------- Thesis Impact Engine: 공시 이벤트 taxonomy (제목 키워드 분류) ----------
+# report_nm 부분일치, 순서대로 첫 매치 채택(구체적인 것 먼저).
+# 각 규칙: (키워드들, event_type, category("dart"/"krx"), level("A"=구조화 신뢰,
+#           "B"=키워드 참고, "C"=시장경보 보류), confidence, severity(1~5, 공시 자체 중요도),
+#           impact_score(Thesis 영향도, None=방향 불명 -> 점수 미반영), reason)
+# level A만 Thesis Impact Score 합산 대상(B/C는 참고 표시만, 향후 구조화 데이터 확보 시 승격).
+_EVENT_RULES = (
+    # --- KRX 시장조치 (Level A) ---
+    (("불성실공시법인지정",), "unfaithful_disclosure", "krx", "A", "HIGH", 4, -4, "불성실공시법인 지정"),
+    (("관리종목지정",), "management_issue", "krx", "A", "HIGH", 4, -4, "관리종목 지정"),
+    (("거래정지",), "trading_halt", "krx", "A", "HIGH", 4, -4, "거래정지"),
+    (("상장적격성",), "delisting_review", "krx", "A", "HIGH", 5, -5, "상장적격성 실질심사"),
+    (("상장폐지",), "delisting_risk", "krx", "A", "HIGH", 5, -5, "상장폐지 관련 공시"),
+
+    # --- DART 공시 (Level A) ---
+    (("횡령",), "embezzlement", "dart", "A", "HIGH", 5, -5, "횡령 발생"),
+    (("배임",), "breach_of_trust", "dart", "A", "HIGH", 5, -5, "배임 발생"),
+    (("회생절차",), "rehabilitation", "dart", "A", "HIGH", 5, -5, "회생절차 개시"),
+    (("감자결정",), "capital_reduction", "dart", "A", "HIGH", 4, -4, "감자 결정"),
+    # ponytail: DART report_nm 은 보통 "감사보고서제출"뿐 의견 유형은 본문에만 있음 -> 실제 매치는 드묾(정직한 한계).
+    (("감사의견거절", "감사의견부적정"), "audit_opinion_adverse", "dart", "A", "HIGH", 5, -5, "감사의견 부적정·거절"),
+    (("감사의견한정",), "audit_opinion_qualified", "dart", "A", "HIGH", 4, -4, "감사의견 한정"),
+    (("최대주주변경",), "major_shareholder_change", "dart", "A", "HIGH", 4, -2, "최대주주 변경"),
+    (("전환사채권발행결정",), "cb_issue", "dart", "A", "HIGH", 3, -2, "전환사채(CB) 발행"),
+    (("신주인수권부사채권발행결정",), "bw_issue", "dart", "A", "HIGH", 3, -2, "신주인수권부사채(BW) 발행"),
+    (("유상증자결정",), "capital_increase", "dart", "A", "HIGH", 3, -2, "유상증자"),
+    (("무상증자결정",), "rights_issue_free", "dart", "A", "HIGH", 2, None, "무상증자 결정"),
+    (("자기주식소각",), "treasury_stock_retire", "dart", "A", "HIGH", 4, 4, "자사주 소각"),
+    (("자기주식취득",), "treasury_stock_buy", "dart", "A", "HIGH", 2, 2, "자사주 취득"),
+    (("현금·현물배당결정", "현금배당결정", "현물배당결정"), "dividend", "dart", "A", "HIGH", 2, None,
+     "배당 결정(확대·축소 여부는 원문 확인)"),
+
+    # --- Level B: 제목 키워드 기반(참고 표시, Thesis Score 미반영) ---
+    (("단일판매공급계약체결",), "contract", "dart", "B", "MEDIUM", 2, 3, "대규모 공급계약"),
+    (("시설투자", "생산설비", "투자결정"), "facility_investment", "dart", "B", "MEDIUM", 2, 2, "시설투자"),
+    (("합병",), "merger", "dart", "B", "MEDIUM", 2, None, "합병"),
+    (("분할",), "split", "dart", "B", "MEDIUM", 2, None, "분할"),
+    (("신규사업",), "new_business", "dart", "B", "MEDIUM", 2, 2, "신규사업 진출"),
+
+    # --- Level C: 시장경보성(참고만, Score 계산 대상 아님) ---
+    (("투자주의",), "investment_caution", "krx", "C", "LOW", 1, None, "투자주의 지정"),
+    (("투자유의",), "investment_alert", "krx", "C", "LOW", 1, None, "투자유의 지정"),
+    (("단기과열",), "short_term_overheating", "krx", "C", "LOW", 1, None, "단기과열 지정"),
+    (("투자경고",), "investment_warning", "krx", "C", "LOW", 1, None, "투자경고 지정"),
+)
+
 UNFAITHFUL_KW = "불성실공시법인지정"   # 지정 사유·벌점은 OpenDART 구조화 API에 없음 -> 원문 링크로 대체(dart_link)
+
+# 스크리너 랭킹 점수(가점/감점/제외)용 event_type 묶음. Thesis Impact Score 와는 별개 개념.
+HARD_EXCLUDE_TYPES = {  # 신규 후보 제외급(기존 HARD_NEGATIVE_KW 대응)
+    "embezzlement", "breach_of_trust", "rehabilitation", "capital_reduction",
+    "audit_opinion_adverse", "audit_opinion_qualified",
+    "unfaithful_disclosure", "management_issue", "delisting_review", "delisting_risk", "trading_halt",
+}
+SOFT_PENALTY_TYPES = {"capital_increase", "cb_issue", "bw_issue", "major_shareholder_change"}
+POSITIVE_BONUS_TYPES = {"treasury_stock_buy", "treasury_stock_retire", "contract"}
 
 
 def dart_link(rcept_no: str):
@@ -274,39 +324,19 @@ def dart_link(rcept_no: str):
     return f"https://dart.fss.or.kr/dsaf001/main.do?rcpNo={rcept_no}" if rcept_no else None
 
 
-def disclosure_score(cat: str, report_nm: str):
-    """★ 공시 영향 점수(1~5)와 한 줄 사유. 내부 참고용, 매수·매도 신호 아님.
+def classify_event(report_nm: str):
+    """공시 제목 -> 이벤트 taxonomy dict. 미매칭이면 None.
 
-    ponytail: 제목 키워드 기반 근사치(희석률 등 세부 수치는 반영 안 함).
-    분류 자체가 없으면 (None, None)."""
+    반환: {event_type, category(dart/krx), level(A/B/C), confidence, severity, impact_score, reason}
+    """
     nm = report_nm or ""
-    if cat == "hard_negative":
-        if "불성실공시법인지정" in nm:
-            return 1, "공시 신뢰도 저하"
-        if "횡령" in nm or "배임" in nm:
-            return 1, "지배구조 리스크"
-        return 1, "상장 적격성 우려"
-    if cat == "soft_negative":
-        return 2, "희석 또는 재무구조 변화 가능성"
-    if cat == "positive":
-        if "자기주식" in nm:
-            return 5, "주주환원 확대"
-        return 4, "매출·실적 성장 가능성"
-    return None, None
-
-
-def classify_disclosure(report_nm: str):
-    """공시 제목 -> 'hard_negative'/'soft_negative'/'positive'/None."""
-    nm = report_nm or ""
-    for kw in HARD_NEGATIVE_KW:
-        if kw in nm:
-            return "hard_negative"
-    for kw in SOFT_NEGATIVE_KW:
-        if kw in nm:
-            return "soft_negative"
-    for kw in POSITIVE_KW:
-        if kw in nm:
-            return "positive"
+    for kws, event_type, category, level, confidence, severity, impact_score, reason in _EVENT_RULES:
+        if any(kw in nm for kw in kws):
+            return {
+                "event_type": event_type, "category": category, "level": level,
+                "confidence": confidence, "classification": ("KRX" if category == "krx" else "DART"),
+                "severity": severity, "impact_score": impact_score, "reason": reason,
+            }
     return None
 
 
@@ -336,26 +366,46 @@ def disclosures(corp_code: str, bgn_de: str, end_de: str):
 
 
 def disclosure_flags(corp_code: str, bgn_de: str, end_de: str):
-    """기간 내 공시를 분류해 {"hard_negative": [...], "soft_negative": [...], "positive": [...]} 반환.
-    각 항목은 {"report_nm", "rcept_dt", "rcept_no", "dart_link"}. 조회 자체가 실패하면 **None**(disclosures 참조)."""
+    """기간 내 공시를 분류해 {"dart": {event_type: [...]}, "krx": {event_type: [...]}} 반환.
+    DART 공시와 KRX 시장조치는 최상위 키로 반드시 분리(합치지 않음).
+    각 항목은 {report_nm, rcept_dt, rcept_no, dart_link, level, confidence, classification,
+    severity, impact_score, reason}. 조회 자체가 실패하면 **None**(disclosures 참조)."""
     items = disclosures(corp_code, bgn_de, end_de)
     if items is None:
         return None
-    out = {"hard_negative": [], "soft_negative": [], "positive": []}
+    out = {"dart": {}, "krx": {}}
     for it in items:
-        cat = classify_disclosure(it.get("report_nm") or "")
-        if cat:
-            rcept_no = it.get("rcept_no")
-            stars, reason = disclosure_score(cat, it.get("report_nm"))
-            out[cat].append({
-                "report_nm": it.get("report_nm"),
-                "rcept_dt": it.get("rcept_dt"),
-                "rcept_no": rcept_no,
-                "dart_link": dart_link(rcept_no),
-                "stars": stars,
-                "reason": reason,
-            })
+        ev = classify_event(it.get("report_nm") or "")
+        if not ev:
+            continue
+        rcept_no = it.get("rcept_no")
+        bucket = out[ev["category"]].setdefault(ev["event_type"], [])
+        bucket.append({
+            "report_nm": it.get("report_nm"),
+            "rcept_dt": it.get("rcept_dt"),
+            "rcept_no": rcept_no,
+            "dart_link": dart_link(rcept_no),
+            "level": ev["level"], "confidence": ev["confidence"], "classification": ev["classification"],
+            "severity": ev["severity"], "impact_score": ev["impact_score"], "reason": ev["reason"],
+        })
     return out
+
+
+def level_a_events(flags: dict):
+    """flags(dart+krx 통합) 중 Level A(Thesis Impact Score 산정 대상) 이벤트 평탄화 리스트."""
+    out = []
+    for cat in ("dart", "krx"):
+        for items in (flags.get(cat) or {}).values():
+            out.extend(it for it in items if it.get("level") == "A")
+    return out
+
+
+def event_types_present(flags: dict) -> set:
+    """flags 안에 등장한 모든 event_type 집합(dart+krx 통합). 스크리너 랭킹 가/감점 판정용."""
+    types = set()
+    for cat in ("dart", "krx"):
+        types |= set((flags.get(cat) or {}).keys())
+    return types
 
 
 def unfaithful_repeat_count(corp_code: str, bgn_de: str, end_de: str, max_pages: int = 30):

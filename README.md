@@ -147,14 +147,17 @@ kospi200_screen.json = 오늘 코스피200 스크리닝 결과(팩터/공시/뉴
 다음을 알려줘.
 1. 내 보유종목별 등락률·평가손익 요약하고, RSI·이동평균으로 주의 필요한 종목 짚어줘.
 2. 보유종목이 kospi200_screen.json의 recommendations에도 있는지 확인하고,
-   있으면 thesis_status·momentum_label·disclosure까지 같이 설명해줘.
+   있으면 thesis(오늘/30일/1년 누적 점수·상태·reasons·action·buffett_lens)·
+   momentum_label·disclosure까지 같이 설명해줘.
 3. recommendations 상위 종목 중 팩터 균형이 좋은 것(가치 PER/PBR + 모멘텀이 함께 좋은
    종목) 위주로 설명해줘. momentum_label도 같이 확인:
    - "원인 불명 변동성"/"재료 미확인 상승"인 종목은 따로 모아서 왜 그런지(뉴스 적음/실적
      근거 없음) 짚어주고 추격 매수 주의 종목으로 표시해줘.
    - "실적 동반 상승"/"공시 모멘텀"인 종목은 근거를 같이 설명해줘.
-4. disclosure에 hard_negative/soft_negative/dilution(특히 제3자배정·일반공모)이 있는
-   종목은 경고로 따로 알려줘. disclosure_checked가 false인 종목은 "공시 미확인" 표시.
+4. disclosure는 dart(기업 공시)/krx(거래소 시장조치) 섹션을 반드시 구분해서 설명해줘.
+   dilution(특히 제3자배정·일반공모)이 있는 종목은 경고로 따로 알려줘.
+   disclosure_checked가 false인 종목은 "공시 미확인" 표시. thesis.state가
+   WEAKENED/BROKEN/UNCONFIRMED인 종목은 thesis.action.items를 행동 변화로 강조해줘.
 5. kodex200_holding 섹션(보유 중이면 존재)이 있으면 close/nav/fluc_rt/momentum_pct를
    macro 섹션(us10y, usdkrw, kospi, foreign_netflow_7d_won)과 같이 보고 지금 환경이
    KODEX200 같은 지수상품 보유에 우호적인지 비우호적인지 한 줄로 평가해줘

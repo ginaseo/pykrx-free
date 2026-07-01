@@ -224,12 +224,13 @@ def main():
             bonus += 0.04
         cur.loc[code, "score"] += bonus
 
-    # === 5-b) DART 성장성/안정성 가점 + 공시 필터 (pool ∪ 보유종목, 키 있을 때만) ===
-    # 공시는 보유종목도 포함해서 본다 — 신규 후보 거를 때뿐 아니라 "투자논리 깨짐" 경고용.
+    # === 5-b) DART 성장성/안정성 가점 + 공시 이벤트 분류 (pool ∪ 보유종목, 키 있을 때만) ===
+    # 공시는 보유종목도 포함해서 본다 — 신규 후보 거를 때뿐 아니라 Thesis Impact Engine 용.
+    # 보유종목은 365일(rolling_365d 계산용), 그 외 후보는 30일만 조회(비용 절감).
     fundamentals = {}
     sectors = {}          # {종목코드: 업종버킷} — 부채 감점 면제 판정 + 출력용
-    disclosure_map = {}   # {종목코드: {"hard_negative":[...], "soft_negative":[...], "positive":[...]}}
-    excluded = set()      # 강한 악재 공시(관리종목/상장폐지/횡령 등) -> 신규 후보만 제외, 보유종목은 경고로 유지
+    disclosure_map = {}   # {종목코드: {"dart": {event_type:[...]}, "krx": {event_type:[...]}}}
+    excluded = set()      # HARD_EXCLUDE_TYPES 공시 -> 신규 후보만 제외, 보유종목은 Thesis 경고로 유지
     dart_codes = sorted(set(pool.index) | (HELD & set(cur.index)))
     if dart is not None:
         try:
@@ -240,8 +241,9 @@ def main():
             sectors = dart.sectors_for(dart_codes, cmap)  # company.json, 캐시
         except Exception:
             sectors = {}
-        disc_bgn = (datetime.datetime.strptime(today, "%Y%m%d")
-                    - datetime.timedelta(days=30)).strftime("%Y%m%d")
+        today_dt = datetime.datetime.strptime(today, "%Y%m%d")
+        disc_bgn_pool = (today_dt - datetime.timedelta(days=30)).strftime("%Y%m%d")
+        disc_bgn_held = (today_dt - datetime.timedelta(days=365)).strftime("%Y%m%d")
         for code in dart_codes:
             cc = cmap.get(code) or cmap.get(dart.base_code(code))  # 우선주->본주
             if not cc:
@@ -262,31 +264,29 @@ def main():
                 if dr is not None and dr > 200 and not dart.is_financial(sectors.get(code)):
                     b -= 0.03
 
+            disc_bgn = disc_bgn_held if code in HELD else disc_bgn_pool
             try:
                 flags = dart.disclosure_flags(cc, disc_bgn, today)
             except Exception:
                 flags = None
             disclosure_map[code] = flags   # None = 조회 실패(모름). "공시 없음"과 절대 혼동 금지.
             if flags is not None:
-                if flags["hard_negative"]:
-                    if any(dart.UNFAITHFUL_KW in (it.get("report_nm") or "")
-                           for it in flags["hard_negative"]):
-                        hist_bgn = (datetime.datetime.strptime(today, "%Y%m%d")
-                                    - datetime.timedelta(days=365 * 5)).strftime("%Y%m%d")
+                types_present = dart.event_types_present(flags)
+                hard_present = bool(types_present & dart.HARD_EXCLUDE_TYPES)
+                if hard_present:
+                    if "unfaithful_disclosure" in types_present:
+                        hist_bgn = (today_dt - datetime.timedelta(days=365 * 5)).strftime("%Y%m%d")
                         try:
                             flags["unfaithful_repeat_5y"] = dart.unfaithful_repeat_count(cc, hist_bgn, today)
                         except Exception:
                             flags["unfaithful_repeat_5y"] = None
-                if flags["hard_negative"] and code not in HELD:
-                    excluded.add(code)
-                elif flags["soft_negative"]:
-                    has_ci = any("유상증자결정" in (it.get("report_nm") or "") for it in flags["soft_negative"])
-                    has_cb = any("전환사채권발행결정" in (it.get("report_nm") or "") for it in flags["soft_negative"])
-                    if has_ci or has_cb:
-                        # 정정공시는 30일 안에 보여도 원결정(배정방식·희석률)은 그보다 훨씬
+                    if code not in HELD:
+                        excluded.add(code)
+                elif types_present & dart.SOFT_PENALTY_TYPES:
+                    if types_present & {"capital_increase", "cb_issue"}:
+                        # 정정공시는 조회기간 안에 보여도 원결정(배정방식·희석률)은 그보다 훨씬
                         # 전일 수 있음(유상증자는 결정->효력발생까지 수개월) -> 1년 범위로 재조회.
-                        dil_bgn = (datetime.datetime.strptime(today, "%Y%m%d")
-                                   - datetime.timedelta(days=365)).strftime("%Y%m%d")
+                        dil_bgn = (today_dt - datetime.timedelta(days=365)).strftime("%Y%m%d")
                         try:
                             dil = dart.dilution_flags(cc, dil_bgn, today)
                         except Exception:
@@ -297,8 +297,8 @@ def main():
                             b += dart.dilution_severity(dil)
                         # dil 조회 실패면 감점 보류(모르는 걸 페널티로 단정 안 함)
                     else:
-                        b -= 0.05  # 그 외 SOFT_NEGATIVE(교환사채 등)는 기존 고정 감점
-                if flags["positive"]:
+                        b -= 0.05  # BW/최대주주변경 등 세부 조회 없는 SOFT_PENALTY 는 기존 고정 감점
+                if types_present & dart.POSITIVE_BONUS_TYPES:
                     b += 0.02
 
             if code in cur.index:
@@ -306,26 +306,6 @@ def main():
 
     if excluded:
         cur = cur.drop(index=[c for c in excluded if c in cur.index])
-
-    # === 5-b') 공시 이력 비교 — "어제 대비 무엇이 달라졌는지"(신규/후속 공시 판정) ===
-    prev_state = briefing_state.load()
-    prev_disclosures = prev_state.get("disclosures") or {}
-    new_disclosures_state = {}
-    for code, flags in disclosure_map.items():
-        if not flags:
-            continue
-        items = flags.get("hard_negative", []) + flags.get("soft_negative", []) + flags.get("positive", [])
-        if not items:
-            continue
-        last_seen = (prev_disclosures.get(code) or {}).get("last_rcept_no") or ""
-        latest = max(items, key=lambda it: it.get("rcept_no") or "")
-        for it in items:
-            it["new"] = (it.get("rcept_no") or "") > last_seen
-        new_disclosures_state[code] = {
-            "last_rcept_no": latest.get("rcept_no"),
-            "last_type": latest.get("report_nm"),
-        }
-    briefing_state.save({**prev_state, "disclosures": {**prev_disclosures, **new_disclosures_state}})
 
     # === 5-c) 뉴스 건수 (최근 7일, Google News RSS) — "재료 없는 변동성" 탐지용 ===
     news_count_map = {}   # 실패(None)는 저장 안 함 -> "확인 안 됨"과 "0건 확인"을 구분
@@ -339,6 +319,114 @@ def main():
             cnt = None
         if cnt is not None:
             news_count_map[code] = cnt
+
+    # === 5-c') 공시 이력 비교 + Thesis Impact Score (보유종목 전용) ===
+    # "어제 대비 무엇이 달라졌는지"(신규/후속 공시 판정) + Thesis 오늘/30일/1년 누적 점수.
+    prev_state = briefing_state.load()
+    prev_disclosures = prev_state.get("disclosures") or {}
+    new_state_disclosures = {}
+    new_state_thesis = {}
+    thesis_map = {}   # {종목코드: Thesis dict} — 보유종목만 채움
+    d30 = (today_dt - datetime.timedelta(days=30)).strftime("%Y%m%d")
+    d365 = (today_dt - datetime.timedelta(days=365)).strftime("%Y%m%d")
+
+    def _thesis_state(score):
+        if score >= 5:
+            return "STRONGLY_STRENGTHENED"
+        if score >= 2:
+            return "STRENGTHENED"
+        if score >= -1:
+            return "MAINTAINED"
+        if score >= -4:
+            return "WEAKENED"
+        return "BROKEN"
+
+    def _thesis_action(state, has_dilution):
+        if state == "BROKEN":
+            return {"level": "CRITICAL", "items": ["후속 공시 확인", "자금 사용 목적 확인", "경영진 설명 확인"]}
+        if state == "WEAKENED":
+            items = ["후속 공시 확인"]
+            if has_dilution:
+                items.append("자금 사용 목적 확인")
+            return {"level": "WARNING", "items": items}
+        return {"level": "INFO", "items": []}
+
+    def _buffett_lens(today_score, rolling_30d):
+        if today_score <= -5 or rolling_30d <= -8:
+            return "사업 경쟁력보다 경영진의 자본배분과 공시 신뢰도를 우선 점검해야 하는 구간입니다."
+        if rolling_30d >= 8:
+            return "기업의 경쟁우위와 주주친화 정책이 장기적으로 유지되고 있는지 확인하면 됩니다."
+        return None
+
+    for code in dart_codes:
+        flags = disclosure_map.get(code)
+        if code not in HELD:
+            continue
+        if flags is None:
+            # 공시 조회 자체 실패 -> "유지"로 단정 금지. 별도 상태로 구분.
+            thesis_map[code] = {
+                "score": {"today": None, "rolling_30d": None, "rolling_365d": None},
+                "state": "UNCONFIRMED", "reasons": ["공시 조회 실패(원문 직접 확인 필요)"],
+                "action": {"level": "WARNING", "items": ["원문 직접 확인"]},
+                "buffett_lens": None, "confidence": 0.0,
+            }
+            continue
+
+        all_events = [it for items in flags.get("dart", {}).values() for it in items] + \
+                     [it for items in flags.get("krx", {}).values() for it in items]
+        if all_events:
+            # dedup 판정은 seen_ids(넉넉한 상한, 365일 조회범위 커버)로 하고, recent(5건)는
+            # 사람이 보는 요약 스냅샷일 뿐 dedup 기준으로 쓰지 않는다 — recent 만 기준으로 삼으면
+            # 5건 넘게 쌓인 종목에서 오래된 이벤트가 매번 "new" 로 되살아나는 버그가 생김.
+            prev_seen_ids = set((prev_disclosures.get(code) or {}).get("seen_ids") or [])
+            for it in all_events:
+                it["new"] = bool(it.get("rcept_no")) and it.get("rcept_no") not in prev_seen_ids
+            sorted_desc = sorted(all_events, key=lambda it: it.get("rcept_no") or "", reverse=True)
+            all_ids = sorted({it.get("rcept_no") for it in all_events if it.get("rcept_no")} | prev_seen_ids,
+                              reverse=True)[:300]
+            new_state_disclosures[code] = {
+                "recent": [{"rcept_no": it.get("rcept_no"), "reason": it.get("reason"), "rcept_dt": it.get("rcept_dt")}
+                           for it in sorted_desc[:5]],
+                "seen_ids": all_ids,
+            }
+
+        a_events = dart.level_a_events(flags)
+        scored = [e for e in a_events if e.get("impact_score") is not None]
+        today_events = [e for e in scored if e.get("new")]
+        d30_events = [e for e in scored if (e.get("rcept_dt") or "") >= d30]
+        d365_events = [e for e in scored if (e.get("rcept_dt") or "") >= d365]
+        today_score = sum(e["impact_score"] for e in today_events)
+        rolling_30d = sum(e["impact_score"] for e in d30_events)
+        rolling_365d = sum(e["impact_score"] for e in d365_events)
+        state = _thesis_state(today_score)
+        reasons = list(dict.fromkeys(e["reason"] for e in today_events))
+
+        has_krx_a = any(it.get("level") == "A" for items in flags.get("krx", {}).values() for it in items)
+        has_dart_a = any(it.get("level") == "A" for items in flags.get("dart", {}).values() for it in items)
+        if has_krx_a and has_dart_a and code in fundamentals:
+            confidence = 0.95
+        elif has_dart_a or has_krx_a:
+            confidence = 0.75
+        elif code in news_count_map:
+            confidence = 0.40
+        else:
+            confidence = 0.20
+
+        thesis_map[code] = {
+            "score": {"today": today_score, "rolling_30d": rolling_30d, "rolling_365d": rolling_365d},
+            "state": state, "reasons": reasons,
+            "action": _thesis_action(state, bool(flags.get("dilution"))),
+            "buffett_lens": _buffett_lens(today_score, rolling_30d),
+            "confidence": confidence,
+        }
+        new_state_thesis[code] = {"today": today_score, "rolling_30d": rolling_30d, "rolling_365d": rolling_365d,
+                                   "state": state}
+
+    briefing_state.save({
+        **prev_state,
+        "disclosures": {**prev_disclosures, **new_state_disclosures},
+        "thesis": {**(prev_state.get("thesis") or {}), **new_state_thesis},
+    })
 
     enriched_codes = set(dart_codes)  # 공시/뉴스/펀더멘털 체크를 실제로 한 종목만 라벨링 대상
     MOMENTUM_HIGH_PCT = 15  # 이 이상 모멘텀이면 "왜 오르는지" 라벨링 대상
@@ -356,49 +444,12 @@ def main():
             return None  # 공시/뉴스/실적 체크 자체를 안 한 종목 -> 모르면 라벨 안 닮(오탐 방지)
         if _growth_good(code):
             return "실적 동반 상승"
-        if (disclosure_map.get(code) or {}).get("positive"):
+        if dart.event_types_present(disclosure_map.get(code) or {}) & dart.POSITIVE_BONUS_TYPES:
             return "공시 모멘텀"
         nc = news_count_map.get(code)
         if nc is not None and nc <= NEWS_LOW_THRESHOLD:
             return "원인 불명 변동성"
         return "재료 미확인 상승"
-
-    def _thesis_status(code):
-        flags = disclosure_map.get(code)
-        if flags is None:
-            return "확인 불가"  # 공시 조회 자체가 안 됨(미체크/API실패) -> "양호"로 단정 금지
-        if flags.get("hard_negative"):
-            return "재검토 필요"
-        fin = fundamentals.get(code)
-        growth_bad = bool(fin and (fin.get("op_growth_pct") or 0) < 0 and (fin.get("rev_growth_pct") or 0) < 0)
-        if flags.get("soft_negative") or growth_bad:
-            return "주의"
-        return "양호"
-
-    _THESIS_DAMAGE_KW = ("횡령", "배임", "상장폐지", "관리종목지정", "회생절차")
-
-    def _thesis_direction(code):
-        """투자 Thesis 방향(강화/유지/약화/훼손). 공시 영향 점수와 별개로 방향성만 표시."""
-        flags = disclosure_map.get(code)
-        if flags is None:
-            return "확인 불가"
-        hard = flags.get("hard_negative") or []
-        if any(kw in (it.get("report_nm") or "") for it in hard for kw in _THESIS_DAMAGE_KW):
-            return "훼손"
-        if hard or flags.get("soft_negative"):
-            return "약화"
-        if flags.get("positive"):
-            return "강화"
-        return "유지"
-
-    def _action_needed(code, direction):
-        """행동 변화 감지 문구. 강화/유지/확인불가는 행동 변화 없음(None)."""
-        if direction == "훼손":
-            return "투자 논리 재검토 필요"
-        if direction == "약화":
-            flags = disclosure_map.get(code) or {}
-            return "자금 사용 목적 확인" if flags.get("dilution") else "후속 공시 확인 필요"
-        return None
 
     # === 5-d) ETF/지수상품 보유 판단용 매크로 (개별종목 무관, 1회만 계산) ===
     macro = {
@@ -442,10 +493,10 @@ def main():
     out_codes = sorted(set(top_non_held) | (HELD & set(final.index)),
                         key=lambda c: -float(final.loc[c, "score"]))
     def _disclosure_out(code):
-        """disclosure_map[code] -> 출력용 dict. 빈 리스트는 제거하되 unfaithful_repeat_5y=0은 보존
-        (0도 유의미한 값 - "이번 건 제외 과거 반복 없음"). 아무 내용 없으면 None."""
+        """disclosure_map[code] -> 출력용 dict. dart/krx 는 반드시 분리 유지, 빈 카테고리는 제거.
+        unfaithful_repeat_5y=0은 보존(0도 유의미 - "이번 건 제외 과거 반복 없음"). 내용 없으면 None."""
         d = disclosure_map.get(code) or {}
-        out = {k: v for k, v in d.items() if k != "unfaithful_repeat_5y" and v}
+        out = {k: v for k, v in d.items() if k not in ("unfaithful_repeat_5y",) and v}
         if d.get("unfaithful_repeat_5y") is not None:
             out["unfaithful_repeat_5y"] = d["unfaithful_repeat_5y"]
         return out or None
@@ -487,9 +538,7 @@ def main():
                 code, None if pd.isna(r["mom_pct"]) else float(r["mom_pct"])),
             "disclosure": _disclosure_out(code),
             "disclosure_checked": disclosure_map.get(code) is not None,
-            "thesis_status": (_thesis_status(code) if code in HELD else None),
-            "thesis_direction": (_thesis_direction(code) if code in HELD else None),
-            "action_needed": (_action_needed(code, _thesis_direction(code)) if code in HELD else None),
+            "thesis": (thesis_map.get(code) if code in HELD else None),
             "news_count_7d": news_count_map.get(code),
         })
 
