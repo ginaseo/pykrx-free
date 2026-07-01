@@ -184,6 +184,38 @@ Phase4 의 ★점수/4단계 방향(thesis_status/thesis_direction/action_needed
   최초 실행 today=-22(스키마 첫 적용이라 전부 new) → 이후 정상 실행에서 today=0/rolling_30d=-8/rolling_365d=-22,
   state=MAINTAINED(오늘 신규 없음이나 최근 추세는 약화 지속 — buffett_lens 규칙대로 문구 노출 확인).
 
+### Phase6 — Thesis State 자동화·Decay·Timeline 보강 (2026-07-01)
+Phase5 실측 후 "state 가 거의 항상 MAINTAINED(오늘 신규 이벤트 없으면 항상 유지로 뜸)" 피드백 반영.
+구조(score/state/reasons/action/buffett_lens/confidence)는 유지, 계산 로직만 보완.
+
+- **State cascade**: `today_score`(0 아니면 그대로) → 0이면 `rolling_30d` → 그것도 0이면
+  `rolling_365d`(decay 적용값) 순으로 대표 점수를 골라 5단계 상태 산정. 신규 이벤트가 없어도
+  최근 추세가 남아 있으면 그 추세로 상태가 매겨짐(기존엔 today_score 만 봐서 거의 늘 MAINTAINED).
+  `reasons`/`contributors`/`buffett_lens` 도 이때 선택된 창(today/30d/365d)의 이벤트 기준으로 계산 —
+  숫자와 서술이 항상 같은 근거를 가리키도록 함.
+- **Score Decay**: `rolling_365d` 는 이벤트 경과일수 가중합(`_decay_weight`: 30일=100%/90일=70%/
+  180일=40%/365일=20%)으로 변경 — 오래된 이벤트일수록 기여도 감소. `today_score`/`rolling_30d` 는
+  창 자체가 30일 이내(weight 100%)라 수치 변화 없음(기존 raw 합과 동일).
+- **contributors**: reason별 기여 점수 합계(사용된 창 기준, 365d 창이면 decay 반영값). "Impact 구성" 표시용.
+- **action 5단계**: BROKEN→CRITICAL(4항목, IR자료확인 추가), WEAKENED→WARNING(기존과 동일),
+  STRENGTHENED/STRONGLY_STRENGTHENED→**WATCH**(다음 실적 확인/신규 계약 진행 확인, 신규 레벨),
+  MAINTAINED→INFO(빈 items).
+- **buffett_lens 긍정 분기 세분화**: rolling_30d≥8 이고 reasons 에 "자사주"/"배당" 포함 시 주주환원 특화 문구,
+  아니면 일반 문구. 부정 분기는 today≤-5 OR rolling_30d≤-8(기존 유지) — 규칙 기반, LLM 생성 아님.
+- **confidence 5단계 갱신**: KRX+DART+실적=0.95, (DART 또는 KRX)+실적=0.75, **실적만=0.50**(신규 구간),
+  뉴스만=0.40, 데이터부족=0.20. `low_confidence`(<0.5) 필드 추가 — "데이터 근거 제한" 표시를 LLM 판단이
+  아닌 데이터 생성 단계 값으로 고정.
+- **last_changed / last_changed_days_ago**: Level A 채점 이벤트 중 가장 최근 `rcept_dt`. 브리핑에서
+  "Thesis 변경 N일 전"에 바로 사용(날짜 계산을 LLM에 맡기지 않음).
+- **timeline**: 채점 이벤트를 (날짜, reason) 중복 제거 후 최신순 최대 10건. 최근 변화 흐름 표시용.
+- **summary**: `state`+상위 3개 `reasons`+`buffett_lens` 조합 템플릿 문자열을 데이터 생성 단계에서 저장
+  (LLM 매번 재추론 안 함). 표시용 `state_label`(이모지 매핑)도 같은 이유로 함께 저장.
+- **실측 검증**: 삼성전자 자사주취득 3건(경과 67~85일, decay 반영) → `rolling_365d=3.0(decay 전 6)`,
+  cascade가 rolling_365d 선택 → `state=STRENGTHENED`(기존엔 today=0이라 MAINTAINED 로 묻혔음).
+  현대차는 decay 후 1.4(<2 임계치)라 `MAINTAINED` 유지 — 문턱값 근처에서 decay 가 상태를 가르는 것 확인.
+  한화솔루션은 rolling_30d=-8(0 아님)이 cascade 로 선택돼 `state=BROKEN`, `action=CRITICAL`,
+  `buffett_lens`/`summary` 정상 생성.
+
 ---
 
 ## 한계 / 확장 여지

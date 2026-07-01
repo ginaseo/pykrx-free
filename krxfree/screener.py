@@ -330,6 +330,20 @@ def main():
     d30 = (today_dt - datetime.timedelta(days=30)).strftime("%Y%m%d")
     d365 = (today_dt - datetime.timedelta(days=365)).strftime("%Y%m%d")
 
+    _STATE_TEXT = {  # 브리핑 변환용(이모지) — 원문은 영문 enum, 표시만 여기서 매핑
+        "STRONGLY_STRENGTHENED": "🟢 크게 강화", "STRENGTHENED": "🟢 강화",
+        "MAINTAINED": "🔵 유지", "WEAKENED": "🟡 약화", "BROKEN": "🔴 훼손",
+        "UNCONFIRMED": "⚪ 확인 불가",
+    }
+    _SUMMARY_LEAD = {
+        "STRONGLY_STRENGTHENED": "투자 논리가 크게 강화되었습니다",
+        "STRENGTHENED": "투자 논리가 강화되었습니다",
+        "MAINTAINED": "투자 논리에 특별한 변화가 없습니다",
+        "WEAKENED": "투자 논리가 약화되었습니다",
+        "BROKEN": "투자 논리가 크게 훼손되었습니다",
+        "UNCONFIRMED": "공시 확인이 되지 않아 투자 논리를 판단할 근거가 부족합니다",
+    }
+
     def _thesis_state(score):
         if score >= 5:
             return "STRONGLY_STRENGTHENED"
@@ -343,20 +357,48 @@ def main():
 
     def _thesis_action(state, has_dilution):
         if state == "BROKEN":
-            return {"level": "CRITICAL", "items": ["후속 공시 확인", "자금 사용 목적 확인", "경영진 설명 확인"]}
+            return {"level": "CRITICAL",
+                    "items": ["후속 공시 확인", "IR 자료 확인", "경영진 설명 확인", "자금 사용 목적 확인"]}
         if state == "WEAKENED":
             items = ["후속 공시 확인"]
             if has_dilution:
                 items.append("자금 사용 목적 확인")
             return {"level": "WARNING", "items": items}
+        if state in ("STRENGTHENED", "STRONGLY_STRENGTHENED"):
+            return {"level": "WATCH", "items": ["다음 실적 확인", "신규 계약 진행 확인"]}
         return {"level": "INFO", "items": []}
 
-    def _buffett_lens(today_score, rolling_30d):
+    def _buffett_lens(today_score, rolling_30d, reasons):
         if today_score <= -5 or rolling_30d <= -8:
-            return "사업 경쟁력보다 경영진의 자본배분과 공시 신뢰도를 우선 점검해야 하는 구간입니다."
+            return "경영진 신뢰도와 자본배분 정책을 우선 점검하세요."
         if rolling_30d >= 8:
-            return "기업의 경쟁우위와 주주친화 정책이 장기적으로 유지되고 있는지 확인하면 됩니다."
+            if any("자사주" in r or "배당" in r for r in reasons):
+                return "자사주 소각·배당 확대 등 주주환원이 이어지고 있습니다 — 장기 경쟁우위 유지 여부를 지속 확인하세요."
+            return "주주환원 정책과 경제적 해자가 유지되는지 확인하세요."
         return None
+
+    def _decay_weight(days_ago):
+        """30일=100%/90일=70%/180일=40%/365일=20% — 오래된 이벤트일수록 rolling_365d 기여도 감소."""
+        if days_ago is None:
+            return 0.0
+        if days_ago <= 30:
+            return 1.0
+        if days_ago <= 90:
+            return 0.7
+        if days_ago <= 180:
+            return 0.4
+        if days_ago <= 365:
+            return 0.2
+        return 0.0
+
+    def _fmt_date(yyyymmdd):
+        return f"{yyyymmdd[:4]}-{yyyymmdd[4:6]}-{yyyymmdd[6:]}" if yyyymmdd else None
+
+    def _thesis_summary(state, reasons, buffett_lens):
+        lead = _SUMMARY_LEAD[state]
+        if reasons:
+            lead += f"({', '.join(reasons[:3])})"
+        return f"{lead}. {buffett_lens}" if buffett_lens else f"{lead}."
 
     for code in dart_codes:
         flags = disclosure_map.get(code)
@@ -366,9 +408,12 @@ def main():
             # 공시 조회 자체 실패 -> "유지"로 단정 금지. 별도 상태로 구분.
             thesis_map[code] = {
                 "score": {"today": None, "rolling_30d": None, "rolling_365d": None},
-                "state": "UNCONFIRMED", "reasons": ["공시 조회 실패(원문 직접 확인 필요)"],
+                "state": "UNCONFIRMED", "state_label": _STATE_TEXT["UNCONFIRMED"],
+                "reasons": ["공시 조회 실패(원문 직접 확인 필요)"], "contributors": [],
                 "action": {"level": "WARNING", "items": ["원문 직접 확인"]},
-                "buffett_lens": None, "confidence": 0.0,
+                "buffett_lens": None, "confidence": 0.0, "low_confidence": True,
+                "last_changed": None, "last_changed_days_ago": None, "timeline": [],
+                "summary": _SUMMARY_LEAD["UNCONFIRMED"] + ".",
             }
             continue
 
@@ -392,32 +437,71 @@ def main():
 
         a_events = dart.level_a_events(flags)
         scored = [e for e in a_events if e.get("impact_score") is not None]
+        # 이벤트별 경과일수 -> decay weight. rcept_dt 없으면(이론상 없음) weight 0(반영 안 함).
+        for e in scored:
+            rd = e.get("rcept_dt")
+            days_ago = (today_dt - datetime.datetime.strptime(rd, "%Y%m%d")).days if rd else None
+            e["_days_ago"] = days_ago
+            e["_weighted_impact"] = round(e["impact_score"] * _decay_weight(days_ago), 2)
+
         today_events = [e for e in scored if e.get("new")]
-        d30_events = [e for e in scored if (e.get("rcept_dt") or "") >= d30]
-        d365_events = [e for e in scored if (e.get("rcept_dt") or "") >= d365]
-        today_score = sum(e["impact_score"] for e in today_events)
-        rolling_30d = sum(e["impact_score"] for e in d30_events)
-        rolling_365d = sum(e["impact_score"] for e in d365_events)
-        state = _thesis_state(today_score)
-        reasons = list(dict.fromkeys(e["reason"] for e in today_events))
+        d30_events = [e for e in scored if (e.get("_days_ago") or 9999) <= 30]
+        d365_events = [e for e in scored if (e.get("_days_ago") or 9999) <= 365]
+        today_score = sum(e["impact_score"] for e in today_events)          # 신규 이벤트는 decay 미적용(방금 인지)
+        rolling_30d = sum(e["impact_score"] for e in d30_events)            # 30일 이내는 weight=1.0 이라 raw 합과 동일
+        rolling_365d = round(sum(e["_weighted_impact"] for e in d365_events), 2)   # decay 적용된 누적
+
+        # Thesis State: today 우선 -> 없으면(0) rolling_30d -> 없으면(0) rolling_365d(decay 반영)
+        cascade_score = today_score or rolling_30d or rolling_365d
+        cascade_events = today_events if today_score else (d30_events if rolling_30d else d365_events)
+        state = _thesis_state(cascade_score)
+        reasons = list(dict.fromkeys(e["reason"] for e in cascade_events))[:5]
+
+        use_weighted = cascade_events is d365_events   # 30일 이내는 weight=1.0 이라 raw 와 동일
+        contrib_agg = {}
+        for e in cascade_events:
+            val = e["_weighted_impact"] if use_weighted else e["impact_score"]
+            contrib_agg[e["reason"]] = contrib_agg.get(e["reason"], 0) + val
+        contributors = [{"reason": r, "impact_score": round(v, 2)}
+                        for r, v in sorted(contrib_agg.items(), key=lambda kv: -abs(kv[1]))]
+
+        last_evt_dt = max((e["rcept_dt"] for e in scored if e.get("rcept_dt")), default=None)
+        last_changed_days_ago = (today_dt - datetime.datetime.strptime(last_evt_dt, "%Y%m%d")).days \
+            if last_evt_dt else None
+
+        seen_pairs = set()
+        timeline = []
+        for e in sorted(scored, key=lambda e: e.get("rcept_dt") or "", reverse=True):
+            key = (e.get("rcept_dt"), e["reason"])
+            if key in seen_pairs:
+                continue
+            seen_pairs.add(key)
+            timeline.append({"date": _fmt_date(e.get("rcept_dt")), "reason": e["reason"]})
+            if len(timeline) >= 10:
+                break
 
         has_krx_a = any(it.get("level") == "A" for items in flags.get("krx", {}).values() for it in items)
         has_dart_a = any(it.get("level") == "A" for items in flags.get("dart", {}).values() for it in items)
-        if has_krx_a and has_dart_a and code in fundamentals:
+        has_fin = code in fundamentals
+        if has_krx_a and has_dart_a and has_fin:
             confidence = 0.95
-        elif has_dart_a or has_krx_a:
+        elif (has_dart_a or has_krx_a) and has_fin:
             confidence = 0.75
+        elif has_fin:
+            confidence = 0.50
         elif code in news_count_map:
             confidence = 0.40
         else:
             confidence = 0.20
 
+        buffett_lens = _buffett_lens(today_score, rolling_30d, reasons)
         thesis_map[code] = {
             "score": {"today": today_score, "rolling_30d": rolling_30d, "rolling_365d": rolling_365d},
-            "state": state, "reasons": reasons,
+            "state": state, "state_label": _STATE_TEXT[state], "reasons": reasons, "contributors": contributors,
             "action": _thesis_action(state, bool(flags.get("dilution"))),
-            "buffett_lens": _buffett_lens(today_score, rolling_30d),
-            "confidence": confidence,
+            "buffett_lens": buffett_lens, "confidence": confidence, "low_confidence": confidence < 0.5,
+            "last_changed": _fmt_date(last_evt_dt), "last_changed_days_ago": last_changed_days_ago,
+            "timeline": timeline, "summary": _thesis_summary(state, reasons, buffett_lens),
         }
         new_state_thesis[code] = {"today": today_score, "rolling_30d": rolling_30d, "rolling_365d": rolling_365d,
                                    "state": state}
