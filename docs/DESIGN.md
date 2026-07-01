@@ -403,6 +403,44 @@ FAISS 추상화·BM25 하이브리드를 넣는 건 JSON 파일 몇 개 grep 하
   `diversification_score=66.2` 정상 산출. 가짜 전일 스냅샷(health 77→80, risk 30→40)을 임시로
   넣어 `change_vs_prev` delta(+3/+10/0) 정확히 계산되는지 확인 후 테스트 파일 정리.
 
+### Phase4.1 — Portfolio Snapshot 스키마 보완 + Risk Score contributors 화 (2026-07-01)
+- **Snapshot 최상위 필드 확장**: `engine_version`(Portfolio Engine 계산 로직 버전, `schema_version`
+  과 별개), `generated_at`(전체 타임스탬프, `snapshot_date`는 날짜만), `risk_score`/
+  `diversification_score`(상세 dict 안에도 있던 값을 최상위에 요약으로 승격), `top_risks`
+  (flags 중 BROKEN 우선 상위 5개), `top_positive_changes`(STRENGTHENED/STRONGLY_STRENGTHENED
+  종목), `action_items`(기존 `actions` 필드명을 사용자 요청대로 변경 — 중복 저장 아님, rename).
+- **risk_score 스케일 전환(중요, 하위 호환 깨짐)**: 기존 "0=안전/100=위험" 에서
+  **"100=안전/0=위험"으로 반전**(portfolio_health 와 동일한 "100에서 감점" 방식으로 통일).
+  이유: 사용자가 요청한 contributors 예시(`{"reason":"불성실공시","impact":-18}` 식 음수 감점)가
+  100에서 깎는 모델이라야 자연스럽게 맞음. `risk.contributors`: Thesis 훼손(가중 40) > KRX
+  시장조치(30) > Thesis 약화(20) > 희석 진행(15) > 업종 집중 50%초과분(15) — 전부 코드에 고정된
+  배점 상수(임의 조정 아님, 재현 가능). **LLM 은 점수가 아니라 contributors 를 설명**하는 게 원칙.
+- **실측 검증**: 훼손 1종목(-8)+KRX시장조치 1종목(-6)+희석 1종목(-3)+업종집중 80%(-9) →
+  `risk_score = 100-8-6-3-9 = 74` 정확히 산출, contributors 4줄 모두 노출 확인.
+
+### Phase5 — Briefing Generator: Rule Engine + Briefing Schema (2026-07-01)
+"LLM이 자유롭게 브리핑을 쓰는 구조가 아니라, 규칙 기반 JSON을 먼저 만들고 LLM은 그 JSON만 읽어
+문장을 쓴다"는 사용자 요청 반영. **LLM 은 계산하지 않는다 — Rule Engine 이 계산하고, LLM 은
+해석·서술만.** 이 원칙은 애초에 이 프로젝트 전체가 지켜온 것(모든 JSON 은 실측/규칙 기반, AI 는
+문장만 작성)과 동일선상 — 이번엔 그 산출물을 3개 파일(kospi200_screen/briefing_data/
+portfolio_snapshot) 대신 **단일 Briefing Schema** 로 통합한 것.
+
+- **`krxfree/briefing_generator.py`**: 새 계산 없음 — `results/kospi200_screen.json` +
+  `results/briefing_data.json` + `results/portfolio_snapshot/`(최신) 만 조합해
+  `results/briefing_schema.json` 생성.
+- **Rule Engine(고정 우선순위, LLM 판단에 안 맡김)**:
+  1. Thesis `BROKEN` 종목은 `top_changes` 상위 3개 안에 반드시 포함(다른 신호와 무관하게 보장).
+  2. `portfolio.health` 를 portfolio 섹션의 첫 필드로(스키마 키 순서 자체가 우선순위 신호).
+  3. 전일 대비 `risk_score` 5점 이상 하락(위험 증가) → `headline` 으로 승격(가장 먼저 노출).
+     그 다음 우선순위는 `portfolio_health` 변화.
+  4. 오늘 신규 이벤트(`thesis.score.today != 0`) 종목은 `top_changes` 후보(BROKEN 다음 순위).
+  5. `WARNING`/`CRITICAL` action 있는 종목은 필터링 없이 전부 `actions` 에 포함.
+- **Schema 구조**: `{schema_version, generated_at, headline, market, portfolio, risk, top_changes,
+  actions, companies, watchlist}` — 사용자 예시 그대로.
+- **실측 검증**: 정상 실행 → `headline=null`(전일 대비 유의미한 변화 없음), `top_changes` 에
+  한화솔루션(BROKEN) 포함 확인. 전일 risk_score 를 인위로 14점 하락시켜 재실행 →
+  `headline={"type":"risk_worsened", ...}` 정상 승격 확인 후 테스트 데이터 원복.
+
 ---
 
 ## 한계 / 확장 여지

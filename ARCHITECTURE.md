@@ -20,16 +20,16 @@ Search Layer           (krxfree/search/* — Knowledge 를 검색하는 공통 A
         ↓
 Portfolio Intelligence Engine   (krxfree/portfolio_engine.py → results/portfolio_snapshot/*.json)
         ↓
-Briefing Generator             ← 예정(Phase3.5, 미구현 — 지금은 AI가 JSON을 직접 읽어 브리핑 작성)
+Briefing Generator              (krxfree/briefing_generator.py → results/briefing_schema.json)
         ↓
 Hermes Integration              ← 예정(Contract 만 설계, docs/HERMES_CONTRACT.md 참조 — 구현 없음)
         ↓
 Slack / Web / Mobile           ← 예정(미구현)
 ```
 
-**지금 실제로 도는 것은 위쪽 5단(Collection → Thesis → Knowledge → Search → Portfolio
-Intelligence)까지다.** Briefing Generator 이후는 로드맵이고 아직 코드가 없다 — 이 문서에서
-"예정"이라고 명시한 부분은 존재하지 않는 것으로 간주할 것.
+**지금 실제로 도는 것은 위쪽 6단(Collection → Thesis → Knowledge → Search → Portfolio
+Intelligence → Briefing Generator)까지다.** Hermes 이후는 로드맵이고 아직 코드가 없다 — 이
+문서에서 "예정"이라고 명시한 부분은 존재하지 않는 것으로 간주할 것.
 
 ---
 
@@ -147,10 +147,25 @@ EmbeddingSearchBackend / HybridSearchBackend
   없음(누적 History). 직전 날짜 스냅샷과 비교해 `change_vs_prev`(health/risk/diversification
   delta) 자동 계산.
 
-### 6. Briefing Generator — 예정(Phase3.5)
-`results/*.json` + `knowledge/company/*/merged.json` + Portfolio Intelligence 결과를
-LLM 이 함께 읽어 최종 브리핑 문장을 생성. 지금은 이 역할을 AI(Claude 등)가 JSON 을 직접
-읽어 대체 수행 중(README.md 프롬프트 예시 참조).
+### 6. Briefing Generator (`krxfree/briefing_generator.py`)
+새 계산 없음 — `results/kospi200_screen.json` + `results/briefing_data.json` +
+`results/portfolio_snapshot/`(최신)만 조합해 **Briefing Schema**(`results/briefing_schema.json`)
+를 만든다. **LLM 은 이 Schema 를 읽고 문장만 쓴다 — 계산은 Rule Engine 이 전부 끝낸 뒤다.**
+
+```
+Rule Engine (고정 우선순위)
+    ↓
+Briefing Schema (schema_version, headline, market, portfolio, risk, top_changes, actions, companies, watchlist)
+    ↓
+LLM (해석·서술만, 계산 없음)
+    ↓
+Slack / Web / Hermes 공통 브리핑
+```
+
+Rule Engine 우선순위(LLM 판단에 안 맡김): ① Thesis `BROKEN` 종목은 `top_changes` 상위 3개
+보장 ② `portfolio.health` 는 portfolio 섹션 첫 필드 ③ risk_score 5점 이상 하락 시 `headline`
+승격 ④ 오늘 신규 이벤트 종목은 `top_changes` 후보 ⑤ WARNING/CRITICAL action 은 필터링 없이
+전부 `actions` 포함. 상세는 `docs/DESIGN.md` Phase5 참조.
 
 ### 7. Hermes Integration — 예정(Contract 만 설계, 구현 없음)
 Engine 이 아니라 Integration Layer. Portfolio Intelligence + Briefing Generator 완성 후

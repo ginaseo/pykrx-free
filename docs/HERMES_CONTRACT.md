@@ -14,7 +14,7 @@ Briefing Generator(Phase3.5, 아직 미구현)가 완성된 뒤 가장 마지막
 | 함수 | 반환 | 지금 있는 소스 |
 |---|---|---|
 | `get_portfolio_health()` | `{score, holdings_checked, strengthened_count, weakened_count, broken_count, top_sector_concentration_pct}` | `results/kospi200_screen.json.portfolio_health` (향후: 최신 `portfolio_snapshot` 기준으로 교체) |
-| `get_daily_briefing()` | `{generated, sections: [...]}` | Briefing Generator(Phase3.5, 미구현) 완성 후 그 산출물 |
+| `get_daily_briefing()` | `results/briefing_schema.json` 그대로(LLM 이 이걸 읽어 최종 문장 생성) | `krxfree.briefing_generator.build_schema()` |
 | `search_knowledge(query, filters=None, top_k=10)` | `[chunk, ...]` | `krxfree.search.engine.SearchEngine.search()` 그대로 |
 | `get_company_thesis(company_code)` | thesis dict | `results/kospi200_screen.json.recommendations[].thesis` |
 | `get_investment_cases(company_code)` | `[investment_case, ...]` | Search Layer 경유(`company_code` + `chunk_type=investment_case` 필터) |

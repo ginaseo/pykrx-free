@@ -15,6 +15,10 @@
 - 현금 비중: portfolio.json 에 현금 잔고 필드 자체가 없음.
 - 보유종목 간 Correlation: 가격 시계열을 전 종목 다시 받아야 하는 별도 계산이라 범위 밖
   (필요성이 확인되면 추가 — 지금은 HHI 기반 집중도로 분산도만 근사).
+
+[risk_score 스케일 주의] 100=위험 요인 없음(portfolio_health 와 동일한 "100에서 감점" 방식).
+숫자만 보지 말고 risk.contributors(왜 깎였는지)를 함께 봐야 함 — LLM 은 점수가 아니라
+contributors 를 설명하는 게 원칙.
 """
 import os
 import json
@@ -117,9 +121,13 @@ def _thesis_distribution(screen):
             "pct": ({k: round(v / n * 100, 1) for k, v in counts.items()} if n else {})}
 
 
-def _portfolio_risk(screen):
-    """훼손·약화 종목 비중 기반 내부 참고 지표(매도 신호 아님)."""
+def _portfolio_risk(screen, top_sector_pct):
+    """100점 만점 안전도 점수(100=위험 요인 없음) — portfolio_health 와 동일한 "100에서 깎는" 방식.
+    score 자체보다 **왜 깎였는지(contributors)** 가 더 중요 — LLM 은 점수가 아니라 contributors 를
+    설명해야 한다(요청 원칙). 각 contributor 의 impact 는 종목 비중(held 종목 수 대비) 기반 감점,
+    코드에 상수로 고정된 배점표를 기준으로 함(재현 가능, 임의 조정 아님)."""
     held = [r for r in screen.get("recommendations", []) if r.get("held")]
+    n = len(held)
     flags = []
     for r in held:
         t = r.get("thesis") or {}
@@ -129,12 +137,41 @@ def _portfolio_risk(screen):
         if (r.get("disclosure") or {}).get("dilution"):
             flags.append({"code": r["code"], "name": r.get("name"), "state": "DILUTION",
                           "reasons": ["희석 진행 중"]})
-    n = len(held)
-    broken = sum(1 for r in held if (r.get("thesis") or {}).get("state") == "BROKEN")
-    weakened = sum(1 for r in held if (r.get("thesis") or {}).get("state") == "WEAKENED")
-    risk_score = round((broken * 2 + weakened) / n * 100, 1) if n else None
-    return {"risk_score": risk_score, "flags": flags,
-            "note": "risk_score 는 훼손·약화 종목 비중 기반 내부 참고 지표(매수·매도 신호 아님)"}
+
+    contributors = []
+    score = 100.0
+    if n:
+        broken = [r for r in held if (r.get("thesis") or {}).get("state") == "BROKEN"]
+        weakened = [r for r in held if (r.get("thesis") or {}).get("state") == "WEAKENED"]
+        krx_flagged = [r for r in held if (r.get("disclosure") or {}).get("krx")]
+        diluted = [r for r in held if (r.get("disclosure") or {}).get("dilution")]
+
+        def _impact(codes, weight):
+            return -round(len(codes) / n * weight, 1) if codes else 0.0
+
+        for label, codes, weight in (
+            ("Thesis 훼손", broken, 40), ("Thesis 약화", weakened, 20),
+            ("불성실공시·관리종목 등 KRX 시장조치", krx_flagged, 30),
+            ("대규모 희석(유상증자 등) 진행", diluted, 15),
+        ):
+            impact = _impact(codes, weight)
+            if impact:
+                score += impact
+                contributors.append({"reason": f"{label} {len(codes)}종목", "impact": impact})
+
+        if top_sector_pct is not None and top_sector_pct > 50:
+            impact = -round((top_sector_pct - 50) / 50 * 15, 1)
+            score += impact
+            contributors.append({"reason": f"업종 집중({top_sector_pct}%)", "impact": impact})
+
+        score = round(max(0.0, min(100.0, score)), 1)
+    else:
+        score = None
+
+    contributors.sort(key=lambda c: c["impact"])
+    return {"score": score, "contributors": contributors, "flags": flags,
+            "note": "100점 만점 안전도(100=위험 요인 없음). 점수보다 contributors(왜 깎였는지)가 "
+                    "핵심 정보 — 매수·매도 신호 아님."}
 
 
 def _diversification(sector_alloc):
@@ -184,6 +221,27 @@ def _delta(prev, cur, path):
     return None
 
 
+def _top_risks(risk, max_n=5):
+    """flags 를 BROKEN 우선으로 정렬해 상위 N개만(우선순위: BROKEN > WEAKENED > DILUTION)."""
+    order = {"BROKEN": 0, "WEAKENED": 1, "DILUTION": 2}
+    return sorted(risk.get("flags", []), key=lambda f: order.get(f.get("state"), 9))[:max_n]
+
+
+def _top_positive_changes(screen, max_n=5):
+    """Thesis 가 강화된 종목(강화 사유 포함) — top_risks 의 반대편."""
+    held = [r for r in screen.get("recommendations", []) if r.get("held")]
+    out = []
+    for r in held:
+        t = r.get("thesis") or {}
+        if t.get("state") in ("STRENGTHENED", "STRONGLY_STRENGTHENED"):
+            out.append({"code": r["code"], "name": r.get("name"), "state": t.get("state"),
+                        "reasons": t.get("reasons")})
+    return out[:max_n]
+
+
+ENGINE_VERSION = "1.0"   # Portfolio Engine 자체 계산 로직 버전(schema_version 과 별개)
+
+
 def build_snapshot():
     screen = _load_json(os.path.join(RESULTS_DIR, "kospi200_screen.json"))
     if screen is None:
@@ -193,24 +251,34 @@ def build_snapshot():
 
     today_str = datetime.datetime.now().strftime("%Y-%m-%d")
     sector_alloc = _sector_allocation(screen, briefing)
+    top_sector_pct = (screen.get("portfolio_health") or {}).get("top_sector_concentration_pct")
+    risk = _portfolio_risk(screen, top_sector_pct)
+    diversification = _diversification(sector_alloc)
+
     snapshot = {
-        "snapshot_date": today_str,
         "schema_version": "1.0",
+        "engine_version": ENGINE_VERSION,
+        "generated_at": datetime.datetime.now().isoformat(timespec="seconds"),
+        "snapshot_date": today_str,
         "portfolio_health": screen.get("portfolio_health"),
+        "risk_score": risk.get("score"),
+        "diversification_score": (diversification or {}).get("diversification_score"),
+        "thesis_distribution": _thesis_distribution(screen),
         "sector_allocation": sector_alloc,
         "theme_exposure": _theme_exposure(screen, engine),
-        "thesis_distribution": _thesis_distribution(screen),
-        "risk": _portfolio_risk(screen),
-        "diversification": _diversification(sector_alloc),
-        "actions": _portfolio_actions(screen),
+        "top_risks": _top_risks(risk),
+        "top_positive_changes": _top_positive_changes(screen),
+        "action_items": _portfolio_actions(screen),
+        "risk": risk,                        # 상세(contributors/flags/note) — risk_score 는 위 요약용
+        "diversification": diversification,  # 상세(sector_hhi/note) — diversification_score 는 위 요약용
     }
 
     prev = _load_prev_snapshot(today_str)
     snapshot["change_vs_prev"] = None if not prev else {
         "prev_date": prev.get("snapshot_date"),
         "portfolio_health_delta": _delta(prev, snapshot, "portfolio_health.score"),
-        "risk_score_delta": _delta(prev, snapshot, "risk.risk_score"),
-        "diversification_score_delta": _delta(prev, snapshot, "diversification.diversification_score"),
+        "risk_score_delta": _delta(prev, snapshot, "risk_score"),
+        "diversification_score_delta": _delta(prev, snapshot, "diversification_score"),
     }
 
     os.makedirs(SNAPSHOT_DIR, exist_ok=True)
@@ -223,4 +291,9 @@ def build_snapshot():
 if __name__ == "__main__":
     s = build_snapshot()
     print("저장 완료 ->", os.path.join(SNAPSHOT_DIR, f"{s['snapshot_date']}.json"))
-    print(json.dumps(s, ensure_ascii=False, indent=2))
+    dump = json.dumps(s, ensure_ascii=False, indent=2)
+    try:
+        print(dump)
+    except UnicodeEncodeError:
+        # 콘솔 코드페이지(cp949 등)가 표현 못 하는 문자가 있어도 저장은 끝났으니 죽지 않게 처리.
+        print(dump.encode("ascii", errors="backslashreplace").decode("ascii"))
